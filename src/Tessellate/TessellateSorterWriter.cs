@@ -5,9 +5,9 @@ using Microsoft.Extensions.Logging;
 
 public interface ITessellateSorterWriter<V> where V : notnull
 {
-    bool Add(V value);
+    ValueTask Add(V value);
 
-    Task Flush();
+    ValueTask Flush();
 }
 
 internal class TessellateSorterWriter<K, T>(
@@ -21,11 +21,11 @@ internal class TessellateSorterWriter<K, T>(
 
     private int _recordsAdded = 0;
 
-    public bool Add(T value)
+    public async ValueTask Add(T value)
     {
         if (_recordsAdded == options.RecordsPerPartition)
         {
-            throw new InvalidOperationException("Should have Flushed after last Add");
+            await Flush();
         }
         
         var buffer = _buffers[^1];
@@ -37,11 +37,9 @@ internal class TessellateSorterWriter<K, T>(
         }
 
         _recordsAdded++;
-
-        return _recordsAdded == options.RecordsPerPartition;
     }
 
-    public async Task Flush()
+    public async ValueTask Flush()
     {
         if (_buffers[0].Count == 0) return;
 
@@ -103,7 +101,7 @@ internal class TessellateSorterWriter<K, T>(
         _recordsAdded = 0;
     }
 
-    private async Task LogTiming(string operation, Func<Task> task)
+    private async ValueTask LogTiming(string operation, Func<Task> task)
     {
         var timer = new Stopwatch();
         timer.Start();
