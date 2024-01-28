@@ -3,7 +3,7 @@ using Microsoft.Extensions.Logging;
 using Parquet.Serialization.Attributes;
 using Tessellate;
 
-var rand = new Random();
+var rand = new Random(12345);
 
 var logged = DateTime.UtcNow;
 
@@ -27,7 +27,7 @@ await ParquetGrouperUtil.LogTiming("End-to-end", async () =>
 
         await ParquetGrouperUtil.LogTiming($"Writing {fileByUniqueId}", async () =>
         {
-            const int count = 100_000_000;
+            const int count = 1_000_000;
 
             var ids = Enumerable.Range(0, count).ToArray();
 
@@ -37,7 +37,7 @@ await ParquetGrouperUtil.LogTiming("End-to-end", async () =>
                 (ids[i], ids[n]) = (ids[n], ids[i]);
             }
 
-            const int randRange = count / 10;
+            var randRange = Math.Max(5, count / 10);
 
             for (var n = 0; n < count; n++)
             {
@@ -62,16 +62,20 @@ await ParquetGrouperUtil.LogTiming("End-to-end", async () =>
 
     const string fileByBucketKey = "by-bucket-key.parquet";
 
+    string GetDateOnly(DateTime dt) => dt.ToString("yyyy-MM-dd");
+
+    // Should be NumericInvoiceNumber also!
+
     var buckets = new Func<InvoiceDeJour, string>[]
     {
-        i => $"{i.InvoiceNumber}:{i.InvoiceDate}:{i.InvoiceAmount}",
+        i => $"{i.InvoiceNumber}:{GetDateOnly(i.InvoiceDate)}:{i.InvoiceAmount}",
         i => $"{i.InvoiceNumber}:{i.InvoiceAmount}",
-        i => $"{i.InvoiceNumber}:{i.InvoiceDate}",
-        i => $"{i.InvoiceDate}:{i.InvoiceAmount}",
-        i => $"{i.InvoiceNumber}:{i.InvoiceDate}:{i.InvoiceAmount}:{i.SupplierName}",
+        i => $"{i.InvoiceNumber}:{GetDateOnly(i.InvoiceDate)}",
+        i => $"{GetDateOnly(i.InvoiceDate)}:{i.InvoiceAmount}",
+        i => $"{i.InvoiceNumber}:{GetDateOnly(i.InvoiceDate)}:{i.InvoiceAmount}:{i.SupplierName}",
         i => $"{i.InvoiceNumber}:{i.InvoiceAmount}:{i.SupplierName}",
-        i => $"{i.InvoiceNumber}:{i.InvoiceDate}:{i.SupplierName}",
-        i => $"{i.InvoiceDate}:{i.InvoiceAmount}:{i.SupplierName}",
+        i => $"{i.InvoiceNumber}:{GetDateOnly(i.InvoiceDate)}:{i.SupplierName}",
+        i => $"{GetDateOnly(i.InvoiceDate)}:{i.InvoiceAmount}:{i.SupplierName}",
     };
 
     var sortByBucketKey = new TessellateSorterService(logger)
@@ -85,16 +89,16 @@ await ParquetGrouperUtil.LogTiming("End-to-end", async () =>
                 await emit(new BucketKey 
                 { 
                     BucketId = b, 
-                    Key = buckets[b](invoice), 
-                    UniqueId = invoice.UniqueId,
+                    Key = buckets[b](invoice.Item), 
+                    UniqueId = invoice.Item.UniqueId,
                 });
             }
         });
 
-    const string filePairsByFirstId = "pairs-by-first-id.parquet";
+    const string fileAllPairsByFirstAndSecondId = "all-pairs-by-first-second-id.parquet";
 
-    var sortPairsByFirstId = new TessellateSorterService(logger)
-        .GetSorter<string, Pair>(x => x.FirstId);
+    var sortAllPairsByFirstAndSecondId = new TessellateSorterService(logger)
+        .GetSorter<(string FirstId, string SecondId), Pair>(x => (x.FirstId, x.SecondId));
 
     var group = new List<BucketKey>();
     const int maxGroupSize = 5;
@@ -103,7 +107,8 @@ await ParquetGrouperUtil.LogTiming("End-to-end", async () =>
     {
         if (group.Count >= 2 && group.Count <= maxGroupSize)
         {
-            var minBucketId = group.Select(x => x.BucketId).Min();
+            // all pairs in this group have the same bucket ID (and key)
+            var bucketId = group[0].BucketId;
 
             for (var x = 0; x < group.Count - 1; x++)
             {
@@ -113,7 +118,7 @@ await ParquetGrouperUtil.LogTiming("End-to-end", async () =>
                     { 
                         FirstId = group[x].UniqueId, 
                         SecondId = group[y].UniqueId, 
-                        MinBucketId = minBucketId 
+                        BucketId = bucketId 
                     });
                 }
             }
@@ -122,39 +127,77 @@ await ParquetGrouperUtil.LogTiming("End-to-end", async () =>
         group.Clear();
     }
 
-    await Pipe(fileByBucketKey, sortByBucketKey, filePairsByFirstId, sortPairsByFirstId,
+    await Pipe(fileByBucketKey, sortByBucketKey, fileAllPairsByFirstAndSecondId, sortAllPairsByFirstAndSecondId,
         async (bucketKey, emit) => 
         {
             // starting or continuing a group
-            if (group.Count == 0 || group[0].Key == bucketKey.Key)
+            if (group.Count == 0 || group[0].Key == bucketKey.Item.Key)
             {
                 // no point keeping more that 1 past max group size
                 if (group.Count <= maxGroupSize) 
                 {
-                    group.Add(bucketKey);
+                    group.Add(bucketKey.Item);
                 }
             }
             else
             {
                 // reach end of group, so generate pairs if it qualifies
                 await EmitPairs(emit);
+                // start next group
+                group.Add(bucketKey.Item);
             }
         },
         EmitPairs);
+
+    const string fileBestPairsByFirstId = "best-pairs-by-first-id.parquet";
+
+    var sortBestPairsByFirstId = new TessellateSorterService(logger)
+        .GetSorter<string, Pair>(x => x.FirstId);
+
+    (string? FirstId, string? SecondId) groupIds = (null, null);
+    byte groupMinBucketId = byte.MaxValue;
+
+    async ValueTask EmitGroupPair(Func<Pair, ValueTask> emit)
+    {
+        if (groupIds.FirstId != null && groupIds.SecondId != null)
+        {
+            await emit(new Pair { BucketId = groupMinBucketId, FirstId = groupIds.FirstId, SecondId = groupIds.SecondId });
+        }
+        groupIds = (null, null);
+        groupMinBucketId = byte.MaxValue;
+    }
+
+    await Pipe(fileAllPairsByFirstAndSecondId, sortAllPairsByFirstAndSecondId, fileBestPairsByFirstId, sortBestPairsByFirstId,
+        async (pair, emit) => 
+        {                        
+            // continuing a group
+            if (groupIds == (pair.Item.FirstId, pair.Item.SecondId))
+            {
+                groupMinBucketId = Math.Min(groupMinBucketId, pair.Item.BucketId);
+            }
+            else // reach end of group (or starting first one)
+            {                
+                await EmitGroupPair(emit);                
+                // start next group
+                groupIds = (pair.Item.FirstId, pair.Item.SecondId);
+                groupMinBucketId = pair.Item.BucketId;
+            }
+        },
+        EmitGroupPair);
 
     const string filePairsBySecondId = "pairs-by-second-id.parquet";
 
     var sortPairsBySecondId = new TessellateSorterService(logger)
         .GetSorter<string, PairWithFirstInvoice>(x => x.SecondId);
 
-    await InnerJoin(filePairsByFirstId, sortPairsByFirstId, x => x.FirstId,
+    await InnerJoin(fileBestPairsByFirstId, sortBestPairsByFirstId, x => x.FirstId,
                     fileByUniqueId, sortByUniqueId, x => x.UniqueId,
                     filePairsBySecondId, sortPairsBySecondId,
                     (pair, firstInvoice, emit) => emit(new() 
                     {
-                        First = firstInvoice,
-                        SecondId = pair.SecondId,
-                        MinBucketId = pair.MinBucketId,
+                        First = firstInvoice.Item,
+                        SecondId = pair.Item.SecondId,
+                        MinBucketId = pair.Item.BucketId,
                     }));
 
     const string fileScoredPairs = "scored-pairs.parquet";
@@ -166,7 +209,7 @@ await ParquetGrouperUtil.LogTiming("End-to-end", async () =>
                     fileByUniqueId, sortByUniqueId, x => x.UniqueId,
                     fileScoredPairs, sortScoredPairsByLeaderId,
                     (pair, secondInvoice, emit) => 
-                        emit(ScoreInvoicePair(pair.First, secondInvoice, pair.MinBucketId)));
+                        emit(ScoreInvoicePair(pair.Item.First, secondInvoice.Item, pair.Item.MinBucketId)));
 
     static PairWithScore ScoreInvoicePair(InvoiceDeJour first, InvoiceDeJour second, byte minBucketId)
     {
@@ -215,7 +258,7 @@ bool TimeToLog()
 async Task Pipe<Source, Target>(
     string sourceFile, ITessellateSorter<Source> sourceSorter,
     string targetFile, ITessellateSorter<Target> targetSorter,
-    Func<Source, Func<Target, ValueTask>, ValueTask> emit,
+    Func<OrdinalItem<Source>, Func<Target, ValueTask>, ValueTask> emit,
     Func<Func<Target, ValueTask>, ValueTask>? flush = null)
     where Source : notnull, new()
     where Target : notnull, new()
@@ -232,16 +275,15 @@ async Task Pipe<Source, Target>(
 
         var writer = targetSorter.Write(target);
 
-        var read = 0;
+        long sourceIndex = 0;
 
         await foreach (var row in sourceSorter.Read(source))
         {
-            await emit(row, writer.Add);
-            read++;
-
+            await emit(new (row, sourceIndex++), writer.Add);
+            
             if (TimeToLog())
             {
-                Console.WriteLine(read);
+                Console.WriteLine(sourceIndex);
             }
         }
 
@@ -258,7 +300,7 @@ async Task InnerJoin<Source1, Source2, Target, Key>(
     string source1File, ITessellateSorter<Source1> source1Sorter, Func<Source1, Key> getKey1,
     string source2File, ITessellateSorter<Source2> source2Sorter, Func<Source2, Key> getKey2,
     string targetFile, ITessellateSorter<Target> targetSorter,    
-    Func<Source1, Source2, Func<Target, ValueTask>, ValueTask> emit,
+    Func<OrdinalItem<Source1>, OrdinalItem<Source2>, Func<Target, ValueTask>, ValueTask> emit,
     Func<Func<Target, ValueTask>, ValueTask>? flush = null)
     where Source1 : class, new()
     where Source2 : class, new()
@@ -332,9 +374,11 @@ async Task InnerJoin<Source1, Source2, Target, Key>(
     });
 }
 
+public record struct OrdinalItem<T>(T Item, long Ordinal);
+
 public static class AsyncExtensions
 {
-    public class Group<T, K>(K key) : List<T>
+    public class Group<T, K>(K key) : List<OrdinalItem<T>>
     {
         public K Key => key;
     }
@@ -343,23 +387,27 @@ public static class AsyncExtensions
     {
         Group<T, K>? group = null;
 
+        long sourceIndex = 0;
+
         await foreach (var item in source)
         {
             var key = getKey(item);
 
             if (group == null)
             {
-                group = new(key) { item };
+                group = new(key) { new(item, sourceIndex) };
             }
             else if (Equals(group.Key, key))
             {
-                group.Add(item);
+                group.Add(new(item, sourceIndex));
             }
             else
             {
                 yield return group;
-                group = new(key) { item };
+                group = new(key) { new(item, sourceIndex) };
             }
+
+            sourceIndex++;
         }
 
         if (group != null)
@@ -367,10 +415,7 @@ public static class AsyncExtensions
             yield return group;
         }
     }
-
 }
-
-
 
 class ParquetGrouperUtil
 {
@@ -401,8 +446,6 @@ class InvoiceDeJour
 
     [ParquetTimestamp] 
     public string SupplierName { get; set; } = string.Empty;
-
-    public static readonly InvoiceDeJour Null = new();
 }
 
 class BucketKey
@@ -418,7 +461,7 @@ class BucketKey
 
 class Pair
 {
-    public byte MinBucketId { get; set; }
+    public byte BucketId { get; set; }
 
     [ParquetRequired] 
     public string FirstId {get; set; } = string.Empty;
@@ -432,7 +475,7 @@ class PairWithFirstInvoice
     public byte MinBucketId { get; set; }
 
     [ParquetRequired] 
-    public InvoiceDeJour First {get; set; } = InvoiceDeJour.Null;
+    public InvoiceDeJour First {get; set; } = new();
 
     [ParquetRequired] 
     public string SecondId {get; set; } = string.Empty;    
