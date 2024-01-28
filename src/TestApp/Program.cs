@@ -39,6 +39,8 @@ await ParquetGrouperUtil.LogTiming("End-to-end", async () =>
 
             var randRange = Math.Max(5, count / 10);
 
+            var baseDateTime = new DateTime(2024, 01, 28, 14, 05, 00);
+
             for (var n = 0; n < count; n++)
             {
                 await writer.Add(new InvoiceDeJour
@@ -46,7 +48,7 @@ await ParquetGrouperUtil.LogTiming("End-to-end", async () =>
                     UniqueId = $"u{ids[n]:0000000000}",
                     InvoiceNumber = $"i{rand.Next(0, randRange):0000000000}",
                     InvoiceAmount = ((decimal)rand.Next(0, randRange)) / 100m,
-                    InvoiceDate = DateTime.UtcNow.AddSeconds(-n * 5),
+                    InvoiceDate = baseDateTime.AddSeconds(-n * 5),
                     SupplierName = $"s{rand.Next(0, randRange):0000000000}",
                 });
                 
