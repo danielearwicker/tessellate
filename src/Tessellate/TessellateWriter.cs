@@ -3,19 +3,18 @@
 using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 
-public interface ITessellateSorterWriter<V> where V : notnull
+public interface ITessellateWriter<V> : IAsyncDisposable
+    where V : notnull
 {
     ValueTask Add(V value);
-
-    ValueTask Flush();
 }
 
-internal class TessellateSorterWriter<K, T>(
+internal class TessellateWriter<K, T>(
     ILogger logger,
     ITessellateTarget<T> target, 
     Func<T, K> selectKey,
-    TessellateSorterOptions options
-) : ITessellateSorterWriter<T> where T : notnull
+    TessellateOptions options
+) : ITessellateWriter<T> where T : notnull
 {
     private readonly List<List<(K, T)>> _buffers = [[]];
 
@@ -39,7 +38,7 @@ internal class TessellateSorterWriter<K, T>(
         _recordsAdded++;
     }
 
-    public async ValueTask Flush()
+    private async ValueTask Flush()
     {
         if (_buffers[0].Count == 0) return;
 
@@ -110,5 +109,11 @@ internal class TessellateSorterWriter<K, T>(
 
         logger.LogInformation("Timing for {operation}: {seconds} seconds", 
                               operation, timer.Elapsed.TotalSeconds);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await Flush();
+        await target.DisposeAsync();
     }
 }

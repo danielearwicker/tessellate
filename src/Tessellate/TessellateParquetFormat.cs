@@ -5,11 +5,23 @@ namespace Tessellate;
 
 public class TessellateParquetFormat : ITessellateFormat
 {
+    public string Extension => ".parquet";
+
     public async Task<ITessellateSource<T>> GetSource<T>(Stream inputStream) where T : new()
-        => new ParquetSource<T>(await ParquetReader.CreateAsync(inputStream));
+        => inputStream.Length == 0 
+            ? new EmptyParquetSource<T>() 
+            : new ParquetSource<T>(await ParquetReader.CreateAsync(inputStream));
 
     public Task<ITessellateTarget<T>> GetTarget<T>(Stream outputStream)
         => Task.FromResult<ITessellateTarget<T>>(new ParquetTarget<T>(outputStream));
+
+    private class EmptyParquetSource<T>() : ITessellateSource<T> where T : new()
+    {
+        public int BatchCount => 0;
+
+        public Task<IList<T>> Read(int batch) => Task.FromException<IList<T>>(
+            new InvalidOperationException("Source is empty"));
+    }
 
     private class ParquetSource<T>(ParquetReader reader) : ITessellateSource<T> where T : new()
     {
@@ -25,6 +37,12 @@ public class TessellateParquetFormat : ITessellateFormat
     private class ParquetTarget<T>(Stream stream) : ITessellateTarget<T>
     {
         private bool _appending = false;
+
+        public async ValueTask DisposeAsync()
+        {
+            await stream.FlushAsync();
+            await stream.DisposeAsync();
+        }
 
         public async Task Write(IEnumerable<T> rows)
         {
