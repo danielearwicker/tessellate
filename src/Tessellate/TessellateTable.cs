@@ -1,6 +1,8 @@
 namespace Tessellate;
 
 using Microsoft.Extensions.Logging;
+using Parquet;
+using Parquet.Serialization;
 
 public interface ITessellateTable<T, K> where T : notnull, new()
 {
@@ -10,14 +12,13 @@ public interface ITessellateTable<T, K> where T : notnull, new()
 
     IAsyncEnumerable<T> Read();
 
-    Task<ITessellateWriter<T>> Write();
+    ITessellateWriter<T> Write();
 }
 
 public class TessellateTable<T, K>(
     ITessellateFile file,
     Func<T, K> selectKey,
     TessellateOptions options,
-    ITessellateFormat format,
     ILogger logger
 ) : ITessellateTable<T, K> where T : notnull, new()
 {
@@ -29,9 +30,14 @@ public class TessellateTable<T, K>(
     {
         using var stream = file.Read();
 
-        var source = await format.GetSource<T>(stream);
+        if (stream.Length == 0)
+        {
+            yield break;
+        }
 
-        var partitions = Math.Ceiling(source.BatchCount / (double)options.BatchesPerPartition);
+        var source = await ParquetReader.CreateAsync(stream);
+
+        var partitions = Math.Ceiling(source.RowGroupCount / (double)options.BatchesPerPartition);
 
         logger.LogInformation("Reading from {partitions} partitions of {name}", partitions, file.Name);
 
@@ -40,7 +46,7 @@ public class TessellateTable<T, K>(
         for (var n = 0; n < partitions; n++)
         {
             var start = n * options.BatchesPerPartition;
-            var end = Math.Min(source.BatchCount, start + options.BatchesPerPartition);
+            var end = Math.Min(source.RowGroupCount, start + options.BatchesPerPartition);
 
             var range = ReadRange(source, start, end).GetAsyncEnumerator();
 
@@ -67,11 +73,12 @@ public class TessellateTable<T, K>(
         }
     }
 
-    private static async IAsyncEnumerable<T> ReadRange(ITessellateSource<T> source, int from, int to)
+    private static async IAsyncEnumerable<T> ReadRange(ParquetReader source, int from, int to)
     {
         for (var n = from; n < to; n++)
         {            
-            var rows = await source.Read(n);
+            using var rowGroupReader = source.OpenRowGroupReader(n);
+            var rows = await ParquetSerializer.DeserializeAsync<T>(rowGroupReader, source.Schema);
 
             foreach (var row in rows)
             {
@@ -80,11 +87,10 @@ public class TessellateTable<T, K>(
         }
     }
 
-    public async Task<ITessellateWriter<T>> Write()
+    public ITessellateWriter<T> Write()
     {
         logger.LogInformation("Writing to {name}", file.Name);
 
-        return new TessellateWriter<K, T>(logger, 
-            await format.GetTarget<T>(file.Write()), selectKey, options);
+        return new TessellateWriter<K, T>(logger, file.Write(), selectKey, options);
     }
 }

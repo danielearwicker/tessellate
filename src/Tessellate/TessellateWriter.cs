@@ -2,6 +2,7 @@
 
 using System.Diagnostics;
 using Microsoft.Extensions.Logging;
+using Parquet.Serialization;
 
 public interface ITessellateWriter<V> : IAsyncDisposable
     where V : notnull
@@ -11,7 +12,7 @@ public interface ITessellateWriter<V> : IAsyncDisposable
 
 internal class TessellateWriter<K, T>(
     ILogger logger,
-    ITessellateTarget<T> target, 
+    Stream target, 
     Func<T, K> selectKey,
     TessellateOptions options
 ) : ITessellateWriter<T> where T : notnull
@@ -19,6 +20,7 @@ internal class TessellateWriter<K, T>(
     private readonly List<List<(K, T)>> _buffers = [[]];
 
     private int _recordsAdded = 0;
+    private bool _appending = false;
 
     public async ValueTask Add(T value)
     {
@@ -80,7 +82,7 @@ internal class TessellateWriter<K, T>(
             {
                 await LogTiming("Saving batch", async () => 
                 {   
-                    await target.Write(batch);
+                    await Write(batch);
                 });
 
                 batch.Clear();
@@ -91,7 +93,7 @@ internal class TessellateWriter<K, T>(
         {
             await LogTiming("Saving leftover batch", async () => 
             {   
-                await target.Write(batch);
+                await Write(batch);
             });
         }
 
@@ -115,5 +117,15 @@ internal class TessellateWriter<K, T>(
     {
         await Flush();
         await target.DisposeAsync();
+    }
+
+    public async Task Write(IEnumerable<T> rows)
+    {
+        await ParquetSerializer.SerializeAsync(
+                    rows,
+                    target,
+                    new ParquetSerializerOptions { Append = _appending });
+
+        _appending = true;
     }
 }

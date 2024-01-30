@@ -13,7 +13,6 @@ Directory.CreateDirectory("output");
 
 var db = new TessellateDatabase(
     new TessellateFileSystemFolder("output"),
-    new TessellateParquetFormat(),
     loggers.CreateLogger("Program")
 );
 
@@ -23,7 +22,7 @@ await ParquetGrouperUtil.LogTiming("End-to-end", async () =>
         "invoices-by-uid", x => x.UniqueId);
 
     {
-        await using var writer = await invoicesByUniqueId.Write();
+        await using var writer = invoicesByUniqueId.Write();
 
         const int count = 1_000_000;
 
@@ -71,7 +70,7 @@ await ParquetGrouperUtil.LogTiming("End-to-end", async () =>
     var invoicesByBucketKey = db.GetTable<BucketKey, (byte, string)>(
         "invoices-by-bucket-key", x => (x.BucketId, x.Key));
 
-    await using (var writer = await invoicesByBucketKey.Write())
+    await using (var writer = invoicesByBucketKey.Write())
     {
         await foreach (var invoice in invoicesByUniqueId.Read())
         {
@@ -90,7 +89,7 @@ await ParquetGrouperUtil.LogTiming("End-to-end", async () =>
     var allPairsByFirstAndSecondId = db.GetTable<Pair, (string FirstId, string SecondId)>(
         "all-pairs-by-first-second-id", x => (x.FirstId, x.SecondId));
     
-    await using (var writer = await allPairsByFirstAndSecondId.Write())
+    await using (var writer = allPairsByFirstAndSecondId.Write())
     {
         var group = new List<BucketKey>();
         const int maxGroupSize = 5;
@@ -145,7 +144,7 @@ await ParquetGrouperUtil.LogTiming("End-to-end", async () =>
     var bestPairsByFirstId = db.GetTable<Pair, string>(
         "best-pairs-by-first-id", x => x.FirstId);
 
-    await using (var writer = await bestPairsByFirstId.Write())
+    await using (var writer = bestPairsByFirstId.Write())
     {
         (string? FirstId, string? SecondId) groupIds = (null, null);
         byte groupMinBucketId = byte.MaxValue;
@@ -184,7 +183,7 @@ await ParquetGrouperUtil.LogTiming("End-to-end", async () =>
     var pairsBySecondId = db.GetTable<PairWithFirstInvoice, string>(
         "pairs-by-second-id", x => x.SecondId);
 
-    await using (var writer = await pairsBySecondId.Write())
+    await using (var writer = pairsBySecondId.Write())
     {
         await foreach (var (pair, firstInvoice) in bestPairsByFirstId.InnerJoin(invoicesByUniqueId))
         {
@@ -200,7 +199,7 @@ await ParquetGrouperUtil.LogTiming("End-to-end", async () =>
     var scoredPairs = db.GetTable<PairWithScore, string>(
         "scored-pairs", x => x.LeaderId);
 
-    await using (var writer = await scoredPairs.Write())
+    await using (var writer = scoredPairs.Write())
     {
         await foreach (var (pair, secondInvoice) in pairsBySecondId.InnerJoin(invoicesByUniqueId))
         {
