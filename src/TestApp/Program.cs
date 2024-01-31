@@ -22,7 +22,8 @@ int GetSimpleStringHash(string str)
     }
 }
 
-var fasty = Environment.GetCommandLineArgs().Contains("--fasty");
+var hashing = args.Contains("--hashing");
+var minimal = args.Contains("--minimal");
 
 var rand = new Random(12345);
 
@@ -45,7 +46,7 @@ var invoicesByUniqueId = db.GetTable<InvoiceDeJour, string>(
 
 await using (var writer = invoicesByUniqueId.Write())
 {
-    const int count = 10_000_000;
+    const int count = 1_000_000;
 
     var ids = Enumerable.Range(0, count).ToArray();
 
@@ -67,7 +68,11 @@ await using (var writer = invoicesByUniqueId.Write())
             InvoiceNumber = $"i{rand.Next(0, randRange):0000000000}",
             InvoiceAmount = rand.Next(0, randRange) / 100m,
             InvoiceDate = baseDateTime.AddSeconds(-n * 5),
-            SupplierName = $"s{rand.Next(0, randRange):0000000000}",
+            SupplierName = $"sn{rand.Next(0, randRange):0000000000}",
+            SupplierRef = $"sr{rand.Next(0, randRange):0000000000}",
+            BaseAmount = rand.Next(0, randRange) / 100m,
+            OrgGroupName = $"o{rand.Next(0, randRange):0000000000}",
+            EnteredBy = $"e{rand.Next(0, randRange):0000000000}",
         });                
     }
 }
@@ -76,7 +81,7 @@ string GetDateOnly(DateTime dt) => dt.ToString("yyyy-MM-dd");
 
 // Should be NumericInvoiceNumber also!
 
-var buckets = new Func<InvoiceDeJour, string>[]
+var buckets = new Func<IBucketValues, string>[]
 {
     i => $"{i.InvoiceNumber}:{GetDateOnly(i.InvoiceDate)}:{i.InvoiceAmount}",
     i => $"{i.InvoiceNumber}:{i.InvoiceAmount}",
@@ -91,7 +96,9 @@ var buckets = new Func<InvoiceDeJour, string>[]
 var invoicesByBucketKey = db.GetTable<BucketKey, (byte, string)>(
     "invoices-by-bucket-key", x => (x.BucketId, x.Key));
 
-if (fasty)
+var invoicesByUniqueIdForBucketing = invoicesByUniqueId.GetView<BucketValues>(x => x.UniqueId);
+
+if (hashing)
 {
     var invoicesByBucketKeyHash = db.GetTable<BucketKeyHash, (byte, int)>(
         "invoices-by-bucket-key-hash", x => (x.BucketId, x.KeyHash),
@@ -99,7 +106,13 @@ if (fasty)
 
     await using (var writer = invoicesByBucketKeyHash.Write())
     {
-        await foreach (var invoice in invoicesByUniqueId.Read())
+        var invoiceIndex = 0;
+
+        var reader = minimal
+            ? invoicesByUniqueIdForBucketing.Read().Cast<IBucketValues>()
+            : invoicesByUniqueId.Read();
+
+        await foreach (var invoice in reader)
         {
             for (byte b = 0; b < buckets.Length; b++)
             {
@@ -107,14 +120,15 @@ if (fasty)
                 { 
                     BucketId = b, 
                     KeyHash = GetSimpleStringHash(buckets[b](invoice)), 
-                    UniqueId = invoice.UniqueId,
+                    InvoiceIndex = invoiceIndex,
                 });
             }
+            invoiceIndex++;
         }
     }
 
-    var potentialBuckets = db.GetTable<PotentialBucket, string>(
-        "potential-buckets", x => x.UniqueId,
+    var potentialBuckets = db.GetTable<PotentialBucket, int>(
+        "potential-buckets", x => x.InvoiceIndex,
         new TessellateOptions(1_000_000));
 
     await using (var writer = potentialBuckets.Write())
@@ -132,7 +146,7 @@ if (fasty)
                     await writer.Add(new PotentialBucket
                     {
                         BucketId = bucketId,
-                        UniqueId = group[x].UniqueId,
+                        InvoiceIndex = group[x].InvoiceIndex,
                     });
                 }
             }
@@ -161,14 +175,29 @@ if (fasty)
 
     await using (var writer = invoicesByBucketKey.Write())
     {
-        await foreach (var (invoice, bucket) in invoicesByUniqueId.InnerJoin(potentialBuckets))
+        if (minimal)
         {
-            await writer.Add(new BucketKey 
-            { 
-                BucketId = bucket.BucketId, 
-                Key = buckets[bucket.BucketId](invoice), 
-                UniqueId = invoice.UniqueId,
-            });
+            await foreach (var ((invoice, index), bucket) in invoicesByUniqueIdForBucketing.InnerJoinByIndex(potentialBuckets))
+            {
+                await writer.Add(new BucketKey 
+                { 
+                    BucketId = bucket.BucketId, 
+                    Key = buckets[bucket.BucketId](invoice), 
+                    InvoiceIndex = bucket.InvoiceIndex,
+                });
+            }
+        }
+        else
+        {
+            await foreach (var ((invoice, index), bucket) in invoicesByUniqueId.InnerJoinByIndex(potentialBuckets))
+            {
+                await writer.Add(new BucketKey 
+                { 
+                    BucketId = bucket.BucketId, 
+                    Key = buckets[bucket.BucketId](invoice), 
+                    InvoiceIndex = bucket.InvoiceIndex,
+                });
+            }
         }
     }
 }
@@ -176,7 +205,13 @@ else
 {
     await using (var writer = invoicesByBucketKey.Write())
     {
-        await foreach (var invoice in invoicesByUniqueId.Read())
+        var invoiceIndex = 0;
+
+        var reader = minimal
+            ? invoicesByUniqueIdForBucketing.Read().Cast<IBucketValues>()
+            : invoicesByUniqueId.Read();
+
+        await foreach (var invoice in reader)
         {
             for (byte b = 0; b < buckets.Length; b++)
             {
@@ -184,15 +219,17 @@ else
                 { 
                     BucketId = b, 
                     Key = buckets[b](invoice),
-                    UniqueId = invoice.UniqueId,
+                    InvoiceIndex = invoiceIndex,
                 });
             }
+
+            invoiceIndex++;
         }
     }
 }
 
-var allPairsByFirstAndSecondId = db.GetTable<Pair, (string FirstId, string SecondId)>(
-    "all-pairs-by-first-second-id", x => (x.FirstId, x.SecondId));
+var allPairsByFirstAndSecondId = db.GetTable<Pair, (int FirstIndex, int SecondIndex)>(
+    "all-pairs-by-first-second-id", x => (x.FirstIndex, x.SecondIndex));
 
 await using (var writer = allPairsByFirstAndSecondId.Write())
 {
@@ -210,16 +247,16 @@ await using (var writer = allPairsByFirstAndSecondId.Write())
             {
                 for (var y = x + 1; y < group.Count; y++)
                 {
-                    var (FirstId, SecondId) = (group[x].UniqueId, group[y].UniqueId);
-                    if (string.Compare(FirstId, SecondId) > 0)
+                    var (FirstId, SecondId) = (group[x].InvoiceIndex, group[y].InvoiceIndex);
+                    if (FirstId > SecondId)
                     {
                         (FirstId, SecondId) = (SecondId, FirstId);
                     }
 
                     await writer.Add(new Pair 
                     { 
-                        FirstId = FirstId, 
-                        SecondId = SecondId, 
+                        FirstIndex = FirstId, 
+                        SecondIndex = SecondId, 
                         BucketId = bucketId 
                     });
                 }
@@ -252,19 +289,24 @@ await using (var writer = allPairsByFirstAndSecondId.Write())
     await EmitPairs();
 }
 
-var bestPairsByFirstId = db.GetTable<Pair, string>(
-    "best-pairs-by-first-id", x => x.FirstId);
+var bestPairsByFirstId = db.GetTable<Pair, int>(
+    "best-pairs-by-first-id", x => x.FirstIndex);
 
 await using (var writer = bestPairsByFirstId.Write())
 {
-    (string? FirstId, string? SecondId) groupIds = (null, null);
+    (int? FirstId, int? SecondId) groupIds = (null, null);
     byte groupMinBucketId = byte.MaxValue;
 
     async ValueTask EmitGroupPair()
     {
         if (groupIds.FirstId != null && groupIds.SecondId != null)
         {
-            await writer.Add(new Pair { BucketId = groupMinBucketId, FirstId = groupIds.FirstId, SecondId = groupIds.SecondId });
+            await writer.Add(new Pair 
+            { 
+                BucketId = groupMinBucketId, 
+                FirstIndex = groupIds.FirstId.Value, 
+                SecondIndex = groupIds.SecondId.Value 
+            });
         }
 
         groupIds = (null, null);
@@ -274,7 +316,7 @@ await using (var writer = bestPairsByFirstId.Write())
     await foreach (var pair in allPairsByFirstAndSecondId.Read())
     {                        
         // continuing a group
-        if (groupIds == (pair.FirstId, pair.SecondId))
+        if (groupIds == (pair.FirstIndex, pair.SecondIndex))
         {
             groupMinBucketId = Math.Min(groupMinBucketId, pair.BucketId);
         }
@@ -283,7 +325,7 @@ await using (var writer = bestPairsByFirstId.Write())
             await EmitGroupPair();
 
             // start next group
-            groupIds = (pair.FirstId, pair.SecondId);
+            groupIds = (pair.FirstIndex, pair.SecondIndex);
             groupMinBucketId = pair.BucketId;
         }
     }
@@ -291,17 +333,17 @@ await using (var writer = bestPairsByFirstId.Write())
     await EmitGroupPair();
 }
 
-var pairsBySecondId = db.GetTable<PairWithFirstInvoice, string>(
-    "pairs-by-second-id", x => x.SecondId);
+var pairsBySecondId = db.GetTable<PairWithFirstInvoice, int>(
+    "pairs-by-second-id", x => x.SecondIndex);
 
 await using (var writer = pairsBySecondId.Write())
 {
-    await foreach (var (pair, firstInvoice) in bestPairsByFirstId.InnerJoin(invoicesByUniqueId))
+    await foreach (var ((firstInvoice, index), pair) in invoicesByUniqueId.InnerJoinByIndex(bestPairsByFirstId))
     {
         await writer.Add(new() 
         {
             First = firstInvoice,
-            SecondId = pair.SecondId,
+            SecondIndex = pair.SecondIndex,
             MinBucketId = pair.BucketId,
         });
     }
@@ -312,7 +354,7 @@ var scoredPairs = db.GetTable<PairWithScore, string>(
 
 await using (var writer = scoredPairs.Write())
 {
-    await foreach (var (pair, secondInvoice) in pairsBySecondId.InnerJoin(invoicesByUniqueId))
+    await foreach (var ((secondInvoice, index), pair) in invoicesByUniqueId.InnerJoinByIndex(pairsBySecondId))
     {
         var first = pair.First;
         var second = secondInvoice;
@@ -364,7 +406,48 @@ class ParquetGrouperUtil
     }
 }
 
-class InvoiceDeJour
+interface IBucketValues
+{
+    public string InvoiceNumber {get; set; }
+
+    public decimal InvoiceAmount { get; set; }
+
+    public DateTime InvoiceDate { get; set; }
+
+    public string SupplierName { get; set; }
+}
+
+class InvoiceDeJour : IBucketValues
+{
+    [ParquetRequired] 
+    public string UniqueId {get; set; } = string.Empty;
+
+    [ParquetRequired] 
+    public string InvoiceNumber {get; set; } = string.Empty;
+
+    [ParquetDecimal(19, 5)] 
+    public decimal InvoiceAmount { get; set; }
+
+    [ParquetDecimal(19, 5)] 
+    public decimal BaseAmount { get; set; }
+
+    [ParquetTimestamp] 
+    public DateTime InvoiceDate { get; set; }
+
+    [ParquetTimestamp] 
+    public string SupplierName { get; set; } = string.Empty;
+
+    [ParquetTimestamp] 
+    public string SupplierRef { get; set; } = string.Empty;
+
+    [ParquetTimestamp] 
+    public string OrgGroupName { get; set; } = string.Empty;
+
+    [ParquetTimestamp] 
+    public string EnteredBy { get; set; } = string.Empty;
+}
+
+class BucketValues : IBucketValues
 {
     [ParquetRequired] 
     public string UniqueId {get; set; } = string.Empty;
@@ -387,10 +470,9 @@ class BucketKey
     public byte BucketId { get; set; }
 
     [ParquetRequired] 
-    public string Key {get; set; } = string.Empty;
+    public string Key { get; set; } = string.Empty;
 
-    [ParquetRequired] 
-    public string UniqueId {get; set; } = string.Empty;
+    public int InvoiceIndex { get; set; }
 }
 
 class BucketKeyHash
@@ -400,27 +482,23 @@ class BucketKeyHash
     [ParquetRequired] 
     public int KeyHash {get; set; }
 
-    [ParquetRequired] 
-    public string UniqueId {get; set; } = string.Empty;
+    public int InvoiceIndex { get; set; }
 }
 
 class PotentialBucket
 {
     public byte BucketId { get; set; }
 
-    [ParquetRequired] 
-    public string UniqueId {get; set; } = string.Empty;
+    public int InvoiceIndex { get; set; }
 }
 
 class Pair
 {
     public byte BucketId { get; set; }
 
-    [ParquetRequired] 
-    public string FirstId {get; set; } = string.Empty;
+    public int FirstIndex { get; set; }
 
-    [ParquetRequired] 
-    public string SecondId {get; set; } = string.Empty;
+    public int SecondIndex { get; set; }
 }
 
 class PairWithFirstInvoice
@@ -430,8 +508,7 @@ class PairWithFirstInvoice
     [ParquetRequired] 
     public InvoiceDeJour First {get; set; } = new();
 
-    [ParquetRequired] 
-    public string SecondId {get; set; } = string.Empty;    
+    public int SecondIndex { get; set; }
 }
 
 
