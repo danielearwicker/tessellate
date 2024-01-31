@@ -91,6 +91,6 @@ public class TessellateTable<T, K>(
     {
         logger.LogInformation("Writing to {name}", file.Name);
 
-        return new TessellateWriter<K, T>(logger, file.Write(), selectKey, options);
+        return new TessellateWriter<K, T>(logger, file.Write(), selectKey, options, file.Name);
     }
 }

@@ -14,7 +14,8 @@ internal class TessellateWriter<K, T>(
     ILogger logger,
     Stream target, 
     Func<T, K> selectKey,
-    TessellateOptions options
+    TessellateOptions options,
+    string targetName
 ) : ITessellateWriter<T> where T : notnull
 {
     private readonly List<List<(K, T)>> _buffers = [[]];
@@ -22,8 +23,15 @@ internal class TessellateWriter<K, T>(
     private int _recordsAdded = 0;
     private bool _appending = false;
 
+    private readonly Stopwatch _timer = new();
+
     public async ValueTask Add(T value)
     {
+        if (!_timer.IsRunning)
+        {
+            _timer.Start();
+        }
+
         if (_recordsAdded == options.RecordsPerPartition)
         {
             await Flush();
@@ -117,6 +125,9 @@ internal class TessellateWriter<K, T>(
     {
         await Flush();
         await target.DisposeAsync();
+
+        logger.LogInformation("Write timing for {name}: {seconds} seconds", 
+                              targetName, _timer.Elapsed.TotalSeconds);
     }
 
     public async Task Write(IEnumerable<T> rows)
