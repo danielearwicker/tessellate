@@ -16,19 +16,34 @@ public static class TessellateExtensions
     /// <returns></returns>
     public static IAsyncEnumerable<(Source1, Source2)> 
         InnerJoin<Source1, Source2, SourceKey>(
-            this ITessellateView<Source1, SourceKey> source1,
-            ITessellateView<Source2, SourceKey> source2)
+            this ISortedStream<Source1, SourceKey> source1,
+            ISortedStream<Source2, SourceKey> source2)
             where Source1 : class, new() 
             where Source2 : class, new()
                 => source1.Read().InnerJoinAdjacent(
-                    source2.Read(), source1.GetKey, source2.GetKey);
+                    source2.Read(), source1.SelectKey, source2.SelectKey);
 
-    public static IAsyncEnumerable<((Source1 Item, int Index), Source2)> 
-        InnerJoinByIndex<Source1, Source2, Source1Key>(
-            this ITessellateView<Source1, Source1Key> source1,
-            ITessellateView<Source2, int> source2)
+    public static IAsyncEnumerable<(Source1, Source2?)> 
+        LeftJoin<Source1, Source2, SourceKey>(
+            this ISortedStream<Source1, SourceKey> source1,
+            ISortedStream<Source2, SourceKey> source2)
             where Source1 : class, new() 
             where Source2 : class, new()
-                => source1.Read().Select((x, i) => (x, i)).InnerJoinAdjacent<(Source1 Item, int Index), Source2, int>(
-                    source2.Read(), s1 => s1.Index, source2.GetKey);                    
+                => source1.Read().LeftJoinAdjacent(source2.Read(), source1.SelectKey, source2.SelectKey);
+
+    public static IAsyncEnumerable<(Source1?, Source2)> 
+        RightJoin<Source1, Source2, SourceKey>(
+            this ISortedStream<Source1, SourceKey> source1,
+            ISortedStream<Source2, SourceKey> source2)
+            where Source1 : class, new() 
+            where Source2 : class, new()
+                => source1.Read().RightJoinAdjacent(source2.Read(), source1.SelectKey, source2.SelectKey);
+
+    public static IAsyncEnumerable<(Source1?, Source2?)> 
+        FullJoin<Source1, Source2, SourceKey>(
+            this ISortedStream<Source1, SourceKey> source1,
+            ISortedStream<Source2, SourceKey> source2)
+            where Source1 : class, new() 
+            where Source2 : class, new()
+                => source1.Read().FullJoinAdjacent(source2.Read(), source1.SelectKey, source2.SelectKey);
 }

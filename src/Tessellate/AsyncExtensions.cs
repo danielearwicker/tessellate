@@ -48,26 +48,52 @@ public static class AsyncExtensions
         }
     }
 
-    /// <summary>
-    /// Reads two sequences in parallel and returns combinations of adjacent
-    /// elements with equal keys.
-    /// 
-    /// If the input sequences are sorted by their corresponding keys, this
-    /// is a true inner join.
-    /// 
-    /// It is possible for multiple adjacent elements to have the same key,
-    /// in which case the resulting sequence will include every combination
-    /// of those matching elements.
-    /// </summary>
-    /// <typeparam name="Source1">Left element type</typeparam>
-    /// <typeparam name="Source2">Right element type</typeparam>
-    /// <typeparam name="SourceKey">Type of common key</typeparam>
-    /// <param name="source1">Left source sequence</param>
-    /// <param name="source2">Right source sequence</param>
-    /// <param name="selectKey1">Delegate that obtains the key from an element of the left sequence</param>
-    /// <param name="selectKey2">Delegate that obtains the key from an element of the right sequence</param>
-    /// <returns></returns>
-    public static async IAsyncEnumerable<(Source1, Source2)> InnerJoinAdjacent<Source1, Source2, SourceKey>(
+    public static async IAsyncEnumerable<(Source1 Left, Source2 Right)> InnerJoinAdjacent<Source1, Source2, SourceKey>(
+        this IAsyncEnumerable<Source1> source1,
+        IAsyncEnumerable<Source2> source2,
+        Func<Source1, SourceKey> selectKey1,
+        Func<Source2, SourceKey> selectKey2)
+    {
+        await foreach (var (left, right) in source1.FullJoinAdjacent(source2, selectKey1, selectKey2))
+        {
+            if (left != null && right != null)
+            {
+                yield return (left, right);
+            }
+        }
+    }
+
+    public static async IAsyncEnumerable<(Source1 Left, Source2? Right)> LeftJoinAdjacent<Source1, Source2, SourceKey>(
+        this IAsyncEnumerable<Source1> source1,
+        IAsyncEnumerable<Source2> source2,
+        Func<Source1, SourceKey> selectKey1,
+        Func<Source2, SourceKey> selectKey2)
+    {
+        await foreach (var (left, right) in source1.FullJoinAdjacent(source2, selectKey1, selectKey2))
+        {
+            if (left != null)
+            {
+                yield return (left, right);
+            }
+        }
+    }
+
+    public static async IAsyncEnumerable<(Source1? Left, Source2 Right)> RightJoinAdjacent<Source1, Source2, SourceKey>(
+        this IAsyncEnumerable<Source1> source1,
+        IAsyncEnumerable<Source2> source2,
+        Func<Source1, SourceKey> selectKey1,
+        Func<Source2, SourceKey> selectKey2)
+    {
+        await foreach (var (left, right) in source1.FullJoinAdjacent(source2, selectKey1, selectKey2))
+        {
+            if (right != null)
+            {
+                yield return (left, right);
+            }
+        }
+    }
+
+    public static async IAsyncEnumerable<(Source1? Left, Source2? Right)> FullJoinAdjacent<Source1, Source2, SourceKey>(
         this IAsyncEnumerable<Source1> source1,
         IAsyncEnumerable<Source2> source2,
         Func<Source1, SourceKey> selectKey1,
@@ -100,12 +126,42 @@ public static class AsyncExtensions
             }
             else if (ordering < 0)
             {
+                foreach (var item in reader1.Current)
+                {
+                    yield return (item, default);
+                }
+
                 got1 = await reader1.MoveNextAsync();
             }
             else
             {
+                foreach (var item in reader2.Current)
+                {
+                    yield return (default, item);
+                }
+
                 got2 = await reader2.MoveNextAsync();
             }
+        }
+
+        while (got1)
+        {
+            foreach (var item in reader1.Current)
+            {
+                yield return (item, default);
+            }
+
+            got1 = await reader1.MoveNextAsync();
+        }
+
+        while (got2)
+        {
+            foreach (var item in reader2.Current)
+            {
+                yield return (default, item);
+            }
+
+            got2 = await reader2.MoveNextAsync();
         }
     }
 }

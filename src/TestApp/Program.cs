@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+﻿using System.Data.Common;
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Parquet.Serialization.Attributes;
 using Tessellate;
@@ -22,10 +23,7 @@ int GetSimpleStringHash(string str)
     }
 }
 
-var hashing = args.Contains("--hashing");
-var minimal = args.Contains("--minimal");
-
-var rand = new Random(12345);
+var rand = new Random(/*12345*/);
 
 var logged = DateTime.UtcNow;
 
@@ -33,30 +31,28 @@ var loggers = LoggerFactory.Create(builder => builder.AddConsole());
 
 Directory.CreateDirectory("output");
 
-var db = new TessellateDatabase(
-    new TessellateFileSystemFolder("output"),
-    loggers.CreateLogger("Program")
-);
-
 var timer = new Stopwatch();
 timer.Start();
 
-var invoicesByUniqueId = db.GetTable<InvoiceDeJour, string>(
-    "invoices-by-uid", x => x.UniqueId);
+var receivedInvoicesByUniqueId = new PartiallySortedStream<ReceivedInvoiceDeJour, string>(
+    Files.Open("input-invoices-by-uid"),
+    x => x.UniqueId
+);
 
-await using (var writer = invoicesByUniqueId.Write())
 {
-    const int count = 1_000_000;
+    var writer = receivedInvoicesByUniqueId.Write();
 
-    var ids = Enumerable.Range(0, count).ToArray();
+    const int count = 1_000;
+
+    var randRange = 500_000;
+
+    var ids = Enumerable.Range(0, randRange).ToArray();
 
     for (var n = 0; n < ids.Length - 1; n++)
     {
         var i = rand.Next(n, ids.Length);
         (ids[i], ids[n]) = (ids[n], ids[i]);
     }
-
-    var randRange = Math.Max(5, count / 10);
 
     var baseDateTime = new DateTime(2024, 01, 28, 14, 05, 00);
 
@@ -73,9 +69,84 @@ await using (var writer = invoicesByUniqueId.Write())
             BaseAmount = rand.Next(0, randRange) / 100m,
             OrgGroupName = $"o{rand.Next(0, randRange):0000000000}",
             EnteredBy = $"e{rand.Next(0, randRange):0000000000}",
-        });                
+        });
+    }
+
+    await writer.Complete();
+}
+
+// Same as receivedInvoicesByUniqueId but with full type
+var inputInvoicesByUniqueId = new PartiallySortedStream<InvoiceDeJour, string>(
+    receivedInvoicesByUniqueId.Stream,
+    receivedInvoicesByUniqueId.SelectKey
+);
+
+// As we update invoices-by-uid, we'll generate this temporary set of upserted by InternalID
+var inputInvoicesByInternalId = new PartiallySortedStream<InvoiceDeJour, int>(
+    Files.Open("input-invoices-by-iid"),
+    x => x.InternalId
+);
+
+int added = 0;
+int updated = 0;
+int unchanged = 0;
+
+using (var ids = new IdGenerator(Files.GetFullPath("invoice-next-id.txt")))
+await using (var updater = new UpdateStream<InvoiceDeJour, string>("invoices-by-uid", x => x.UniqueId))
+{
+    var writerByInternalId = inputInvoicesByInternalId.Write();
+
+    await foreach (var (existing, input) in updater.Existing.FullJoin(inputInvoicesByUniqueId))
+    {
+        if (input == null)
+        {
+            unchanged++;
+            // therefore existing must be non-null
+            await updater.Writer.Add(existing!);
+        }
+        else // we have input, so it replaces existing
+        {
+            if (existing == null)
+            {
+                added++;
+                // never seen this UniqueId before, so make new InternalId
+                input.InternalId = ids.GetNext();
+            }
+            else // updating, so retain existing InternalId
+            {
+                updated++;
+                input.InternalId = existing.InternalId;
+            }
+
+            await updater.Writer.Add(input);
+            await writerByInternalId.Add(input);
+        }
+    }
+
+    await writerByInternalId.Complete();
+}
+
+Console.WriteLine($"Added: {added}, Updated: {updated}, Unchanged: {unchanged}");
+
+await using (var updater = new UpdateStream<InvoiceDeJour, int>("invoices-by-iid", x => x.InternalId))
+{
+    await foreach (var (existing, input) in updater.Existing.FullJoin(inputInvoicesByInternalId))
+    {
+        if (input == null)
+        {
+            await updater.Writer.Add(existing!);
+        }
+        else // we have input, so it replaces existing
+        {
+            await updater.Writer.Add(input);
+        }
     }
 }
+
+var invoicesByInternalId = new PartiallySortedStream<InvoiceDeJour, int>(
+    Files.Open("invoices-by-iid", true), 
+    x => x.InternalId
+);
 
 string GetDateOnly(DateTime dt) => dt.ToString("yyyy-MM-dd");
 
@@ -93,146 +164,116 @@ var buckets = new Func<IBucketValues, string>[]
     i => $"{GetDateOnly(i.InvoiceDate)}:{i.InvoiceAmount}:{i.SupplierName}",
 };
 
-var invoicesByBucketKey = db.GetTable<BucketKey, (byte, string)>(
-    "invoices-by-bucket-key", x => (x.BucketId, x.Key));
+var invoicesByBucketKey = new PartiallySortedStream<BucketKey, (byte, string)>(
+    Files.Open("invoices-by-bucket-key"),
+    x => (x.BucketId, x.Key)
+);
 
-var invoicesByUniqueIdForBucketing = invoicesByUniqueId.GetView<BucketValues>(x => x.UniqueId);
+var invoicesByInternalIdForBucketing = new PartiallySortedStream<BucketValues, int>(
+    invoicesByInternalId.Stream, 
+    x => x.InternalId
+);
 
-if (hashing)
+var invoicesByBucketKeyHash = new PartiallySortedStream<BucketKeyHash, (byte, int)>(
+    Files.Open("invoices-by-bucket-key-hash"),
+    x => (x.BucketId, x.KeyHash),
+    1_000_000);
+
 {
-    var invoicesByBucketKeyHash = db.GetTable<BucketKeyHash, (byte, int)>(
-        "invoices-by-bucket-key-hash", x => (x.BucketId, x.KeyHash),
-        new TessellateOptions(1_000_000));
+    var writer = invoicesByBucketKeyHash.Write();
 
-    await using (var writer = invoicesByBucketKeyHash.Write())
+    var reader = invoicesByInternalIdForBucketing.Read();
+
+    await foreach (var invoice in reader)
     {
-        var invoiceIndex = 0;
-
-        var reader = minimal
-            ? invoicesByUniqueIdForBucketing.Read().Cast<IBucketValues>()
-            : invoicesByUniqueId.Read();
-
-        await foreach (var invoice in reader)
+        for (byte b = 0; b < buckets.Length; b++)
         {
-            for (byte b = 0; b < buckets.Length; b++)
-            {
-                await writer.Add(new BucketKeyHash
-                { 
-                    BucketId = b, 
-                    KeyHash = GetSimpleStringHash(buckets[b](invoice)), 
-                    InvoiceIndex = invoiceIndex,
-                });
-            }
-            invoiceIndex++;
+            await writer.Add(new BucketKeyHash
+            { 
+                BucketId = b, 
+                KeyHash = GetSimpleStringHash(buckets[b](invoice)), 
+                InvoiceInternalId = invoice.InternalId,
+            });
         }
     }
 
-    var potentialBuckets = db.GetTable<PotentialBucket, int>(
-        "potential-buckets", x => x.InvoiceIndex,
-        new TessellateOptions(1_000_000));
-
-    await using (var writer = potentialBuckets.Write())
-    {
-        var group = new List<BucketKeyHash>();
-
-        async ValueTask EmitPotentials()
-        {
-            if (group.Count > 1)
-            {                
-                var bucketId = group[0].BucketId;
-
-                for (var x = 0; x < group.Count; x++)
-                {
-                    await writer.Add(new PotentialBucket
-                    {
-                        BucketId = bucketId,
-                        InvoiceIndex = group[x].InvoiceIndex,
-                    });
-                }
-            }
-
-            group.Clear();
-        }
-
-        await foreach (var keyHash in invoicesByBucketKeyHash.Read())
-        {
-            if (group.Count != 0)
-            {
-                var g = group[0];
-                
-                if (g.BucketId != keyHash.BucketId ||
-                    g.KeyHash != keyHash.KeyHash)
-                {
-                    await EmitPotentials();
-                }
-            }
-
-            group.Add(keyHash);
-        }
-
-        await EmitPotentials();
-    }
-
-    await using (var writer = invoicesByBucketKey.Write())
-    {
-        if (minimal)
-        {
-            await foreach (var ((invoice, index), bucket) in invoicesByUniqueIdForBucketing.InnerJoinByIndex(potentialBuckets))
-            {
-                await writer.Add(new BucketKey 
-                { 
-                    BucketId = bucket.BucketId, 
-                    Key = buckets[bucket.BucketId](invoice), 
-                    InvoiceIndex = bucket.InvoiceIndex,
-                });
-            }
-        }
-        else
-        {
-            await foreach (var ((invoice, index), bucket) in invoicesByUniqueId.InnerJoinByIndex(potentialBuckets))
-            {
-                await writer.Add(new BucketKey 
-                { 
-                    BucketId = bucket.BucketId, 
-                    Key = buckets[bucket.BucketId](invoice), 
-                    InvoiceIndex = bucket.InvoiceIndex,
-                });
-            }
-        }
-    }
-}
-else
-{
-    await using (var writer = invoicesByBucketKey.Write())
-    {
-        var invoiceIndex = 0;
-
-        var reader = minimal
-            ? invoicesByUniqueIdForBucketing.Read().Cast<IBucketValues>()
-            : invoicesByUniqueId.Read();
-
-        await foreach (var invoice in reader)
-        {
-            for (byte b = 0; b < buckets.Length; b++)
-            {
-                await writer.Add(new BucketKey
-                { 
-                    BucketId = b, 
-                    Key = buckets[b](invoice),
-                    InvoiceIndex = invoiceIndex,
-                });
-            }
-
-            invoiceIndex++;
-        }
-    }
+    await writer.Complete();
 }
 
-var allPairsByFirstAndSecondId = db.GetTable<Pair, (int FirstIndex, int SecondIndex)>(
-    "all-pairs-by-first-second-id", x => (x.FirstIndex, x.SecondIndex));
+var potentialBuckets = new PartiallySortedStream<PotentialBucket, int>(
+    Files.Open("potential-buckets"), 
+    x => x.InvoiceInternalId,
+    1_000_000);
 
-await using (var writer = allPairsByFirstAndSecondId.Write())
 {
+    var writer = potentialBuckets.Write();
+
+    var group = new List<BucketKeyHash>();
+
+    async ValueTask EmitPotentials()
+    {
+        if (group.Count > 1)
+        {                
+            var bucketId = group[0].BucketId;
+
+            for (var x = 0; x < group.Count; x++)
+            {
+                await writer.Add(new PotentialBucket
+                {
+                    BucketId = bucketId,
+                    InvoiceInternalId = group[x].InvoiceInternalId,
+                });
+            }
+        }
+
+        group.Clear();
+    }
+
+    await foreach (var keyHash in invoicesByBucketKeyHash.Read())
+    {
+        if (group.Count != 0)
+        {
+            var g = group[0];
+            
+            if (g.BucketId != keyHash.BucketId ||
+                g.KeyHash != keyHash.KeyHash)
+            {
+                await EmitPotentials();
+            }
+        }
+
+        group.Add(keyHash);
+    }
+
+    await EmitPotentials();
+
+    await writer.Complete();
+}
+
+{
+    var writer = invoicesByBucketKey.Write();
+
+    await foreach (var (invoice, bucket) in invoicesByInternalIdForBucketing.InnerJoin(potentialBuckets))
+    {
+        await writer.Add(new BucketKey 
+        { 
+            BucketId = bucket.BucketId, 
+            Key = buckets[bucket.BucketId](invoice), 
+            InvoiceIndex = bucket.InvoiceInternalId,
+        });
+    }
+
+    await writer.Complete();
+}
+
+
+var allPairsByFirstAndSecondId = new PartiallySortedStream<Pair, (int FirstIndex, int SecondIndex)>(
+    Files.Open("all-pairs-by-first-second-id"), 
+    x => (x.FirstId, x.SecondId));
+
+{
+    var writer = allPairsByFirstAndSecondId.Write();
+
     var group = new List<BucketKey>();
     const int maxGroupSize = 5;
 
@@ -255,8 +296,8 @@ await using (var writer = allPairsByFirstAndSecondId.Write())
 
                     await writer.Add(new Pair 
                     { 
-                        FirstIndex = FirstId, 
-                        SecondIndex = SecondId, 
+                        FirstId = FirstId, 
+                        SecondId = SecondId, 
                         BucketId = bucketId 
                     });
                 }
@@ -287,13 +328,17 @@ await using (var writer = allPairsByFirstAndSecondId.Write())
     }
 
     await EmitPairs();
+
+    await writer.Complete();
 }
 
-var bestPairsByFirstId = db.GetTable<Pair, int>(
-    "best-pairs-by-first-id", x => x.FirstIndex);
+var bestPairsByFirstId = new PartiallySortedStream<Pair, int>(
+    Files.Open("best-pairs-by-first-id"), 
+    x => x.FirstId);
 
-await using (var writer = bestPairsByFirstId.Write())
 {
+    var writer = bestPairsByFirstId.Write();
+
     (int? FirstId, int? SecondId) groupIds = (null, null);
     byte groupMinBucketId = byte.MaxValue;
 
@@ -304,8 +349,8 @@ await using (var writer = bestPairsByFirstId.Write())
             await writer.Add(new Pair 
             { 
                 BucketId = groupMinBucketId, 
-                FirstIndex = groupIds.FirstId.Value, 
-                SecondIndex = groupIds.SecondId.Value 
+                FirstId = groupIds.FirstId.Value, 
+                SecondId = groupIds.SecondId.Value 
             });
         }
 
@@ -316,7 +361,7 @@ await using (var writer = bestPairsByFirstId.Write())
     await foreach (var pair in allPairsByFirstAndSecondId.Read())
     {                        
         // continuing a group
-        if (groupIds == (pair.FirstIndex, pair.SecondIndex))
+        if (groupIds == (pair.FirstId, pair.SecondId))
         {
             groupMinBucketId = Math.Min(groupMinBucketId, pair.BucketId);
         }
@@ -325,36 +370,43 @@ await using (var writer = bestPairsByFirstId.Write())
             await EmitGroupPair();
 
             // start next group
-            groupIds = (pair.FirstIndex, pair.SecondIndex);
+            groupIds = (pair.FirstId, pair.SecondId);
             groupMinBucketId = pair.BucketId;
         }
     }
 
     await EmitGroupPair();
+
+    await writer.Complete();
 }
 
-var pairsBySecondId = db.GetTable<PairWithFirstInvoice, int>(
-    "pairs-by-second-id", x => x.SecondIndex);
+var pairsBySecondId = new PartiallySortedStream<PairWithFirstInvoice, int>(
+    Files.Open("pairs-by-second-id"), 
+    x => x.SecondId);
 
-await using (var writer = pairsBySecondId.Write())
 {
-    await foreach (var ((firstInvoice, index), pair) in invoicesByUniqueId.InnerJoinByIndex(bestPairsByFirstId))
+    var writer = pairsBySecondId.Write();
+
+    await foreach (var (firstInvoice, pair) in invoicesByInternalId.InnerJoin(bestPairsByFirstId))
     {
         await writer.Add(new() 
         {
             First = firstInvoice,
-            SecondIndex = pair.SecondIndex,
+            SecondId = pair.SecondId,
             MinBucketId = pair.BucketId,
         });
     }
+
+    await writer.Complete();
 }
 
-var scoredPairs = db.GetTable<PairWithScore, string>(
-    "scored-pairs", x => x.LeaderId);
+var scoredPairs = new PartiallySortedStream<PairWithScore, string>(
+    Files.Open("scored-pairs"), x => x.LeaderId);
 
-await using (var writer = scoredPairs.Write())
 {
-    await foreach (var ((secondInvoice, index), pair) in invoicesByUniqueId.InnerJoinByIndex(pairsBySecondId))
+    var writer = scoredPairs.Write();
+
+    await foreach (var (secondInvoice, pair) in invoicesByInternalId.InnerJoin(pairsBySecondId))
     {
         var first = pair.First;
         var second = secondInvoice;
@@ -373,8 +425,10 @@ await using (var writer = scoredPairs.Write())
             MinBucketId = minBucketId,
             Score = GetFirstNonZeroDigit(first.SupplierName) * GetFirstNonZeroDigit(second.SupplierName)
         });
-    }   
-}    
+    }
+
+    await writer.Complete();
+}
 
 timer.Stop();
 Console.WriteLine($"All: {timer.Elapsed.TotalSeconds}");
@@ -393,17 +447,62 @@ static int GetFirstNonZeroDigit(string str)
     return 0;
 }
 
-class ParquetGrouperUtil
+public static class Files
 {
-    public static async Task LogTiming(string label, Func<Task> task)
+    public static string GetFullPath(string name) => $"output/{name}.parquet";
+
+    public static void Replace(string target, string updated)
     {
-        Console.WriteLine($"{label}...");
-        var timer = new Stopwatch();
-        timer.Start();
-        await task();
-        timer.Stop();
-        Console.WriteLine($"{label}: {timer.Elapsed.TotalSeconds}");
+        var trash = GetFullPath($"{target}-trash");
+
+        File.Move(GetFullPath(target), trash);
+        File.Move(GetFullPath(updated), GetFullPath(target));
+        File.Delete(trash);
     }
+
+    public static Stream Open(string name, bool retainExisting = false) 
+        => new FileStream(GetFullPath(name),
+                            retainExisting ? FileMode.OpenOrCreate : FileMode.Create, 
+                            FileAccess.ReadWrite);
+}
+
+class UpdateStream<T, K> : IAsyncDisposable
+    where T : notnull, new()
+{
+    public PreSortedStream<T, K> Existing { get; }
+    public ITessellateWriter<T> Writer { get; }
+
+    private readonly PreSortedStream<T, K> updated;
+    private readonly string _baseName;
+
+    private string UpdatedName => $"{_baseName}-updated";
+
+    public UpdateStream(string baseName, Func<T, K> selectKey)
+    {
+        _baseName = baseName;
+        Existing = new(Files.Open(_baseName, true), selectKey);
+        updated = new(Files.Open(UpdatedName, false), selectKey);
+        Writer = updated.Write();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await Writer.Complete();
+        await Existing.Stream.DisposeAsync();
+        await updated.Stream.DisposeAsync();
+
+        Files.Replace(_baseName, UpdatedName);
+    }
+}
+
+public sealed class IdGenerator(string fileName) : IDisposable
+{
+    private readonly string _fileName = fileName;
+    private int _nextId = File.Exists(fileName) ? int.Parse(File.ReadAllText(fileName)) : 1;
+
+    public int GetNext() => _nextId++;
+
+    public void Dispose() => File.WriteAllText(_fileName, $"{_nextId}");
 }
 
 interface IBucketValues
@@ -417,7 +516,7 @@ interface IBucketValues
     public string SupplierName { get; set; }
 }
 
-class InvoiceDeJour : IBucketValues
+class ReceivedInvoiceDeJour : IBucketValues
 {
     [ParquetRequired] 
     public string UniqueId {get; set; } = string.Empty;
@@ -447,10 +546,16 @@ class InvoiceDeJour : IBucketValues
     public string EnteredBy { get; set; } = string.Empty;
 }
 
+class InvoiceDeJour : ReceivedInvoiceDeJour
+{
+    [ParquetRequired] 
+    public int InternalId {get; set; }
+}
+
 class BucketValues : IBucketValues
 {
     [ParquetRequired] 
-    public string UniqueId {get; set; } = string.Empty;
+    public int InternalId {get; set; }
 
     [ParquetRequired] 
     public string InvoiceNumber {get; set; } = string.Empty;
@@ -482,23 +587,23 @@ class BucketKeyHash
     [ParquetRequired] 
     public int KeyHash {get; set; }
 
-    public int InvoiceIndex { get; set; }
+    public int InvoiceInternalId { get; set; }
 }
 
 class PotentialBucket
 {
     public byte BucketId { get; set; }
 
-    public int InvoiceIndex { get; set; }
+    public int InvoiceInternalId { get; set; }
 }
 
 class Pair
 {
     public byte BucketId { get; set; }
 
-    public int FirstIndex { get; set; }
+    public int FirstId { get; set; }
 
-    public int SecondIndex { get; set; }
+    public int SecondId { get; set; }
 }
 
 class PairWithFirstInvoice
@@ -508,9 +613,8 @@ class PairWithFirstInvoice
     [ParquetRequired] 
     public InvoiceDeJour First {get; set; } = new();
 
-    public int SecondIndex { get; set; }
+    public int SecondId { get; set; }
 }
-
 
 class PairWithScore
 {
