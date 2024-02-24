@@ -3,34 +3,56 @@ namespace Tessellate;
 using Parquet;
 using Parquet.Serialization;
 
-public record PartiallySortedStream<T, K>(
+/// <summary>
+/// A Parquet file to which records can be written in any order, and when
+/// later read the records will be ordered by the provided key. 
+/// 
+/// During writing, a set of rows are buffered in memory until there are 
+/// enough to make a partition. They are sorted by the key and then
+/// written as a set of Parquet row groups.
+/// 
+/// This process continues until all rows are written, and the resulting
+/// file consists of one or more partitions (each made up of several row
+/// groups), and the rows are correctly sorted within each partition.
+/// 
+/// When reading the file, a merge sort is used to read row groups from
+/// all the partitions, so that the rows are merged into fully sorted 
+/// order across the entire file.
+/// </summary>
+/// <typeparam name="T">The row type</typeparam>
+/// <typeparam name="K">The sort key type</typeparam>
+/// <param name="Stream">The stream that stores the Parquet data</param>
+/// <param name="SelectKey">Function that selects the sort key from a record</param>
+/// <param name="RowsPerGroup">Number of records per Parquet row group</param>
+/// <param name="RowGroupsPerPartition">Number of row groups per sorted partition</param>
+public record MergeSortingParquet<T, K>(
     Stream Stream,
     Func<T, K> SelectKey,
-    int RecordsPerBatch = 100_000, 
-    int BatchesPerPartition = 100)
-: ISortedStream<T, K> where T : notnull, new()
+    int RowsPerGroup = 100_000, 
+    int RowGroupsPerPartition = 100)
+: ISortedTable<T, K> where T : notnull, new()
 {
-    public int RecordsPerPartition => RecordsPerBatch * BatchesPerPartition;
+    public int RecordsPerPartition => RowsPerGroup * RowGroupsPerPartition;
 
-    public async IAsyncEnumerable<T> Read()
+    public async IAsyncEnumerator<T> GetAsyncEnumerator(CancellationToken cancellation)
     {
         if (Stream.Length == 0)
         {
             yield break;
         }
 
-        var source = await ParquetReader.CreateAsync(Stream);
+        var source = await ParquetReader.CreateAsync(Stream, cancellationToken: cancellation);
 
-        var partitions = Math.Ceiling(source.RowGroupCount / (double)BatchesPerPartition);
+        var partitions = Math.Ceiling(source.RowGroupCount / (double)RowGroupsPerPartition);
 
         var queue = new PriorityQueue<IAsyncEnumerator<T>, K>();
 
         for (var n = 0; n < partitions; n++)
         {
-            var start = n * BatchesPerPartition;
-            var end = Math.Min(source.RowGroupCount, start + BatchesPerPartition);
+            var start = n * RowGroupsPerPartition;
+            var end = Math.Min(source.RowGroupCount, start + RowGroupsPerPartition);
 
-            var range = ReadRange(source, start, end).GetAsyncEnumerator();
+            var range = ReadRange(source, start, end).GetAsyncEnumerator(cancellation);
 
             if (await range.MoveNextAsync())
             {
@@ -65,10 +87,10 @@ public record PartiallySortedStream<T, K>(
         }
     }
 
-    public ITessellateWriter<T> Write() => new Writer(this);
+    public ITableWriter<T> Write() => new Writer(this);
 
-    private class Writer(PartiallySortedStream<T, K> target)
-        : ITessellateWriter<T> 
+    private class Writer(MergeSortingParquet<T, K> target)
+        : ITableWriter<T> 
     {
         private readonly List<List<(K, T)>> _buffers = [[]];
 
@@ -135,7 +157,7 @@ public record PartiallySortedStream<T, K>(
                     queue.Enqueue(en, en.Current.Item1);
                 }
 
-                if (batch.Count == target.RecordsPerBatch)
+                if (batch.Count == target.RowsPerGroup)
                 {
                     await Write(batch);
                     batch.Clear();
@@ -148,6 +170,7 @@ public record PartiallySortedStream<T, K>(
             }
 
             await target.Stream.FlushAsync();
+            target.Stream.Position = 0;
 
             _buffers.Clear();
             _buffers.Add([]);

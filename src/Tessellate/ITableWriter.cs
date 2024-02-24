@@ -1,6 +1,6 @@
 ﻿namespace Tessellate;
 
-public interface ITessellateWriter<V> where V : notnull
+public interface ITableWriter<V> where V : notnull
 {
     ValueTask Add(V value);
 

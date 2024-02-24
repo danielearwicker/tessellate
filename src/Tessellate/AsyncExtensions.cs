@@ -1,51 +1,51 @@
+using SuperLinq.Async;
+
 namespace Tessellate.AsyncEnumerableExtensions;
 
 public static class AsyncExtensions
 {
-    public class Group<T, K>(K key) : List<T>, IGrouping<K, T>
+/// <summary>
+/// Alternative to SuperLinq's GroupAdjacent that protects against needing unlimited 
+/// memory to buffer each group by using an <paramref name="aggregate"/> function to 
+/// reduce each group member into some type <typeparamref name="G"/> representing
+/// the group.
+/// </summary>
+/// <typeparam name="T">Item to be grouped</typeparam>
+/// <typeparam name="K">Key to group by</typeparam>
+/// <typeparam name="G">Group of items</typeparam>
+/// <param name="source">Source of items to group</param>
+/// <param name="selectKey">Function that selects the key to group by</param>
+/// <param name="aggregate">Takes the current group and a new member for it, and 
+/// returns the updated group</param>
+/// <returns></returns>
+    public static async IAsyncEnumerable<G> GroupAdjacentAggregated<T, K, G>(
+        this IAsyncEnumerable<T> source,
+        Func<T, K> selectKey,
+        Func<G> newGroup,
+        Func<G, T, G> aggregate)
     {
-        public K Key => key;
-    }
+        var e = source.GetAsyncEnumerator();
+        if (!await e.MoveNextAsync()) yield break;
 
-    /// <summary>
-    /// Returns a sequence of groupings of adjacent elements with the same 
-    /// key.
-    /// 
-    /// Typically the source sequence is already sorted by that key so the
-    /// groupings contain all elements with a given key.
-    /// </summary>
-    /// <typeparam name="T">Element type</typeparam>
-    /// <typeparam name="K">Key type</typeparam>
-    /// <param name="source">Sequence (usually already sorted by key)</param>
-    /// <param name="selectKey">Delegate that obtains the key from an element</param>
-    /// <returns></returns>
-    public static async IAsyncEnumerable<Group<T, K>> GroupByAdjacent<T, K>(this IAsyncEnumerable<T> source, Func<T, K> selectKey)
-    {
-        Group<T, K>? group = null;
+        var groupKey = selectKey(e.Current);
+        var group = aggregate(newGroup(), e.Current);
 
-        await foreach (var item in source)
+        while (await e.MoveNextAsync())
         {
-            var key = selectKey(item);
+            var newKey = selectKey(e.Current);
 
-            if (group == null)
-            {
-                group = new(key) { item };
-            }
-            else if (Equals(group.Key, key))
-            {
-                group.Add(item);
-            }
-            else
+            if (Comparer<K>.Default.Compare(groupKey, newKey) != 0)
             {
                 yield return group;
-                group = new(key) { item };
+
+                groupKey = newKey;
+                group = newGroup();
             }
+
+            group = aggregate(group, e.Current);
         }
 
-        if (group != null)
-        {
-            yield return group;
-        }
+        yield return group;
     }
 
     public static async IAsyncEnumerable<(Source1 Left, Source2 Right)> InnerJoinAdjacent<Source1, Source2, SourceKey>(
@@ -99,8 +99,8 @@ public static class AsyncExtensions
         Func<Source1, SourceKey> selectKey1,
         Func<Source2, SourceKey> selectKey2)
     {
-        var reader1 = source1.GroupByAdjacent(selectKey1).GetAsyncEnumerator();
-        var reader2 = source2.GroupByAdjacent(selectKey2).GetAsyncEnumerator();
+        var reader1 = source1.GroupAdjacent(selectKey1).GetAsyncEnumerator();
+        var reader2 = source2.GroupAdjacent(selectKey2).GetAsyncEnumerator();
 
         var got1 = await reader1.MoveNextAsync();
         var got2 = await reader2.MoveNextAsync();
@@ -113,11 +113,11 @@ public static class AsyncExtensions
             if (ordering == 0)
             {
                 // yield cartesian product of matched groups
-                for (var x = 0; x < group1.Count; x++)
+                foreach (var x in group1)
                 {
-                    for (var y = 0; y < group2.Count; y++)
+                    foreach (var y in group2)
                     {
-                        yield return (group1[x], group2[y]);
+                        yield return (x, y);
                     }
                 }
 

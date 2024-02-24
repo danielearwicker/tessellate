@@ -7,6 +7,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Tessellate", "Tessellate\Te
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TestApp", "TestApp\TestApp.csproj", "{C01DF4AC-79D5-4403-AF20-EDC7E455D51D}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BlobHell", "BlobHell\BlobHell.csproj", "{2E5A2062-46FD-4EC7-B25A-D60F2771B0D8}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -24,5 +26,9 @@ Global
 		{C01DF4AC-79D5-4403-AF20-EDC7E455D51D}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{C01DF4AC-79D5-4403-AF20-EDC7E455D51D}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{C01DF4AC-79D5-4403-AF20-EDC7E455D51D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2E5A2062-46FD-4EC7-B25A-D60F2771B0D8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2E5A2062-46FD-4EC7-B25A-D60F2771B0D8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2E5A2062-46FD-4EC7-B25A-D60F2771B0D8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2E5A2062-46FD-4EC7-B25A-D60F2771B0D8}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
