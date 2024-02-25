@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+
 namespace Tessellate;
 
 public interface ITableSource
@@ -14,7 +16,8 @@ public interface ITableSource
     ITempSortedTable<T, K> MergeSorting<T, K>(
         Func<T, K> selectKey,
         int rowsPerGroup = 100_000, 
-        int rowGroupsPerPartition = 100) where T : notnull, new();
+        int rowGroupsPerPartition = 100,
+        string? loggingName = null) where T : notnull, new();
 
     /// <summary>
     /// Creates a <see cref="PreSortedParquet"/> table backed by a temporary Parquet file.
@@ -29,15 +32,16 @@ public interface ITableSource
         int rowsPerGroup = 100_000) where T : notnull, new();
 }
 
-public class TableSource(IFileSource files) : ITableSource
+public class TableSource(IFileSource files, ILogger<TableSource> logger) : ITableSource
 {
     public ITempSortedTable<T, K> MergeSorting<T, K>(
         Func<T, K> selectKey,
         int rowsPerGroup = 100_000, 
-        int rowGroupsPerPartition = 100) where T : notnull, new()
+        int rowGroupsPerPartition = 100,
+        string? loggingName = null) where T : notnull, new()
     {
         var file = files.Create();
-        var table = new MergeSortingParquet<T, K>(file.Content, selectKey, rowsPerGroup, rowGroupsPerPartition);
+        var table = new MergeSortingParquet<T, K>(file.Content, selectKey, rowsPerGroup, rowGroupsPerPartition, logger, loggingName);
         return new TempSortedTable<T, K>(file, table);
     }
 
@@ -58,6 +62,9 @@ public class TableSource(IFileSource files) : ITableSource
         public Func<T, K> SelectKey => Table.SelectKey;
 
         public Stream Stream => File.Content;
+
+        public ISortedView<T2, K> Cast<T2>(Func<T2, K> selectKey) where T2 : notnull, new()
+            => Table.Cast(selectKey);
 
         public void Dispose() => File.Dispose();    
 

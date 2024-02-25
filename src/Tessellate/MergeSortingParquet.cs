@@ -1,5 +1,7 @@
 namespace Tessellate;
 
+using System.Diagnostics;
+using Microsoft.Extensions.Logging;
 using Parquet;
 using Parquet.Serialization;
 
@@ -29,9 +31,14 @@ public record MergeSortingParquet<T, K>(
     Stream Stream,
     Func<T, K> SelectKey,
     int RowsPerGroup = 100_000, 
-    int RowGroupsPerPartition = 100)
+    int RowGroupsPerPartition = 100,
+    ILogger? Logger = null,
+    string? LoggingName = null)
 : ISortedTable<T, K> where T : notnull, new()
 {
+    public ISortedView<T2, K> Cast<T2>(Func<T2, K> selectKey) where T2 : notnull, new()
+        => new MergeSortingParquet<T2, K>(Stream, selectKey, RowsPerGroup, RowGroupsPerPartition, Logger, LoggingName);
+
     public int RecordsPerPartition => RowsPerGroup * RowGroupsPerPartition;
 
     public async IAsyncEnumerator<T> GetAsyncEnumerator(CancellationToken cancellation)
@@ -46,6 +53,9 @@ public record MergeSortingParquet<T, K>(
         var partitions = Math.Ceiling(source.RowGroupCount / (double)RowGroupsPerPartition);
 
         var queue = new PriorityQueue<IAsyncEnumerator<T>, K>();
+
+        Logger?.LogInformation("Reading {groups} row groups as {partitions} partitions from [{name}]",
+            source.RowGroupCount, partitions, LoggingName);
 
         for (var n = 0; n < partitions; n++)
         {
@@ -73,12 +83,14 @@ public record MergeSortingParquet<T, K>(
         }
     }
 
-    private static async IAsyncEnumerable<T> ReadRange(ParquetReader source, int from, int to)
+    private async IAsyncEnumerable<T> ReadRange(ParquetReader source, int from, int to)
     {
         for (var n = from; n < to; n++)
         {            
             using var rowGroupReader = source.OpenRowGroupReader(n);
             var rows = await ParquetSerializer.DeserializeAsync<T>(rowGroupReader, source.Schema);
+
+            Logger?.LogInformation("Reading row group {n} from [{name}]", n, LoggingName);
 
             foreach (var row in rows)
             {
@@ -130,15 +142,21 @@ public record MergeSortingParquet<T, K>(
         {
             if (_buffers[0].Count == 0) return;
 
+            target.Logger?.LogInformation("Parallel sorting {buffers} buffers writing [{name}]", _buffers.Count, target.LoggingName);
+
             _buffers.AsParallel().ForAll(buffer =>
             {
-                buffer.Sort((x, y) => Comparer<K>.Default.Compare(x.Item1, y.Item1));    
+                buffer.Sort((x, y) => Comparer<K>.Default.Compare(x.Item1, y.Item1));
             });
 
             var queue = new PriorityQueue<IEnumerator<(K, T)>, K>();        
         
+            var totalItems = 0;
+
             foreach (var buffer in _buffers)
             {
+                totalItems += buffer.Count;
+
                 var en = buffer.GetEnumerator();
                 if (en.MoveNext())
                 {
@@ -148,8 +166,12 @@ public record MergeSortingParquet<T, K>(
 
             var batch = new List<T>();
 
+            var timer = new Stopwatch();
+            timer.Start();
+
             while (queue.TryDequeue(out var en, out var k))
             {
+                totalItems--;                
                 batch.Add(en.Current.Item2);
 
                 if (en.MoveNext())
@@ -161,6 +183,13 @@ public record MergeSortingParquet<T, K>(
                 {
                     await Write(batch);
                     batch.Clear();
+                }
+
+                if (timer.Elapsed.TotalSeconds > 1)
+                {
+                    timer.Restart();
+                    target.Logger?.LogInformation("Merge sorting with {totalItems} remaining writing [{name}]",
+                        totalItems, target.LoggingName);
                 }
             }
 

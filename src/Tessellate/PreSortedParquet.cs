@@ -22,6 +22,9 @@ public record PreSortedParquet<T, K>(
     int RowsPerGroup = 100_000)
 : ISortedTable<T, K> where T : notnull, new()
 {
+    public ISortedView<T2, K> Cast<T2>(Func<T2, K> selectKey) where T2 : notnull, new()
+        => new PreSortedParquet<T2, K>(Stream, selectKey, RowsPerGroup);
+
     public async IAsyncEnumerator<T> GetAsyncEnumerator(CancellationToken cancellation)
     {
         if (Stream.Length == 0)

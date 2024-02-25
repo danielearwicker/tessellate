@@ -21,9 +21,10 @@ public static class TessellateExtensions
         ITableSource tables,
         Func<T, K> selectKey,
         int recordsPerBatch = 100_000,
-        int batchesPerPartition = 100) where T : notnull, new()
+        int batchesPerPartition = 100,
+        string? loggingName = null) where T : notnull, new()
     {
-        var table = tables.MergeSorting(selectKey, recordsPerBatch, batchesPerPartition);
+        var table = tables.MergeSorting(selectKey, recordsPerBatch, batchesPerPartition, loggingName);
         await source.ToTable(table);
         return table;
     }

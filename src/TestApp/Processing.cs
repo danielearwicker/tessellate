@@ -10,32 +10,42 @@ using TestApp.Models;
 
 public interface IProcessing
 {
-    public Task<ITempSortedTable<InvoiceDeJour, string>> GetIncomingInvoices(int count, int randRange);
+    public Task<ITempSortedTable<InvoiceDeJour, string>> 
+        GetIncomingInvoices(int count, int randRange);
 
-    public Task<ITempSortedTable<InvoiceDeJour, int>> GetIncomingInvoicesByInternalId(
-        ISortedTable<InvoiceDeJour, string> inputInvoicesByUniqueId);
+    public Task<ITempSortedTable<InvoiceDeJour, int>> 
+        GetIncomingInvoicesByInternalId(
+            ISortedTable<InvoiceDeJour, string> inputInvoicesByUniqueId);
 
-    public Task<ITempSortedTable<InvoiceDeJour, int>> GetAllInvoicesByInternalId(
-        ITempSortedTable<InvoiceDeJour, int> inputInvoicesByInternalId);
+    public Task<ITempSortedTable<InvoiceDeJour, int>> 
+        GetAllInvoicesByInternalId(
+            ITempSortedTable<InvoiceDeJour, int> inputInvoicesByInternalId);
 
-    public Task<ITempSortedTable<BucketKeyHash, (byte BucketId, int InternalId)>> GetInvoiceIdsByBucketKeyHash(
-        ISortedTable<InvoiceDeJour, int> invoicesByInternalId);
+    public Task<ITempSortedTable<BucketKeyHash, (byte BucketId, int InternalId)>> 
+        GetInvoiceIdsByBucketKeyHash(
+            ISortedTable<InvoiceDeJour, int> invoicesByInternalId);
 
-    public Task<ITempSortedTable<PotentialBucket, int>> GetPotentialBuckets(
-        ISortedTable<BucketKeyHash, (byte BucketId, int InternalId)> invoicesByBucketKeyHash);
+    public Task<ITempSortedTable<PotentialBucket, int>> 
+        GetPotentialBuckets(
+            ISortedTable<BucketKeyHash, (byte BucketId, int InternalId)> invoicesByBucketKeyHash);
 
-    public Task<ITempSortedTable<BucketKey, (byte BucketId, string BucketKey)>> GetInvoicesByBucketKey(
-        ISortedTable<PotentialBucket, int> potentialBuckets,
-        ISortedTable<InvoiceDeJour, int> invoicesByInternalId);
+    public Task<ITempSortedTable<BucketKey, (byte BucketId, string BucketKey)>> 
+        GetInvoicesByBucketKey(
+            ISortedTable<PotentialBucket, int> potentialBuckets,
+            ISortedTable<InvoiceDeJour, int> invoicesByInternalId);
 
-    public Task<ITempSortedTable<Pair, (int FirstId, int SecondId)>> GetPairsByFirstAndSecondId(
-        ISortedTable<BucketKey, (byte BucketId, string BucketKey)> invoicesByBucketKey);
-    public Task<ITempSortedTable<Pair, int>> GetBestPairsByFirstId(
-        ISortedTable<Pair, (int FirstId, int SecondId)> allPairsByFirstAndSecondId);
+    public Task<ITempSortedTable<Pair, (int FirstId, int SecondId)>> 
+        GetPairsByFirstAndSecondId(
+            ISortedTable<BucketKey, (byte BucketId, string BucketKey)> invoicesByBucketKey);
 
-    public Task<ITempSortedTable<PairWithFirstInvoice, int>> GetPairsBySecondId(
-        ISortedTable<Pair, int>  bestPairsByFirstId,
-        ITempSortedTable<InvoiceDeJour, int> invoicesByInternalId);
+    public Task<ITempSortedTable<Pair, int>> 
+        GetBestPairsByFirstId(
+            ISortedTable<Pair, (int FirstId, int SecondId)> allPairsByFirstAndSecondId);
+
+    public Task<ITempSortedTable<PairWithFirstInvoice, int>> 
+        GetPairsBySecondId(
+            ISortedTable<Pair, int>  bestPairsByFirstId,
+            ITempSortedTable<InvoiceDeJour, int> invoicesByInternalId);
 
     public Task SavePairScores(
         ISortedTable<PairWithFirstInvoice, int> pairsBySecondId,
@@ -67,7 +77,7 @@ public class Processing(IProcessingBlobs blobs, ITableSource tables) : IProcessi
 
     public async Task<ITempSortedTable<InvoiceDeJour, string>> GetIncomingInvoices(int count, int randRange)
     {
-        var table = tables.MergeSorting((InvoiceDeJour x) => x.UniqueId);
+        var table = tables.MergeSorting((InvoiceDeJour x) => x.UniqueId, loggingName: "incoming invoices");
 
         var writer = table.Write();
 
@@ -128,21 +138,28 @@ public class Processing(IProcessingBlobs blobs, ITableSource tables) : IProcessi
         ISortedTable<InvoiceDeJour, string> inputInvoicesByUniqueId)
     {
         // As we update invoices-by-uid, we'll generate this temporary set of upserted by InternalID
-        var inputInvoicesByInternalId = tables.MergeSorting((InvoiceDeJour x) => x.InternalId);
+        var inputInvoicesByInternalId = tables.MergeSorting((InvoiceDeJour x) => x.InternalId, 
+            loggingName: "invoices by InternalId");
 
         // Permanent store of invoices by UniqueId
-        var invoicesByUid = tables.MergeSorting((InvoiceDeJour x) => x.UniqueId);
-        var invoicesByUidBlob = blobs.Get("invoices-by-uid");
+        var invoicesByUid = tables.MergeSorting((InvoiceDeJour x) => x.UniqueId,
+            loggingName: "invoices by UniqueId (original)");
 
+        var invoicesByUidBlob = blobs.Get("invoices-by-uid");
         await invoicesByUidBlob.Download(invoicesByUid.Stream);
 
-        var invoicesByUidUpdated = tables.MergeSorting((InvoiceDeJour x) => x.UniqueId);
+        var invoicesByUidUpdated = tables.MergeSorting((InvoiceDeJour x) => x.UniqueId,
+            loggingName: "invoices by UniqueId (updated)");
 
         // Permanent reverse index, UniqueId by InternalId
-        var uidsByInternalId = tables.MergeSorting((UniqueIdByInternalId x) => x.InternalId);
+        var uidsByInternalId = tables.MergeSorting((UniqueIdByInternalId x) => x.InternalId,
+            loggingName: "UniqueId by InternalId (original)");
+            
         var uidsByInternalIdBlob = blobs.Get("uids-by-iid");
         await uidsByInternalIdBlob.Download(uidsByInternalId.Stream);
-        var uidsByInternalIdUpdated = tables.MergeSorting((UniqueIdByInternalId x) => x.InternalId);
+        
+        var uidsByInternalIdUpdated = tables.MergeSorting((UniqueIdByInternalId x) => x.InternalId,
+            loggingName: "UniqueId by InternalId (updated)");
 
         int added = 0;
         int updated = 0;
@@ -208,14 +225,16 @@ public class Processing(IProcessingBlobs blobs, ITableSource tables) : IProcessi
         ITempSortedTable<InvoiceDeJour, int> inputInvoicesByInternalId)
     {
         // Permanent store of invoices by InternalId
-        var invoicesByInternalId = tables.MergeSorting((InvoiceDeJour x) => x.InternalId);
-        var invoicesByInternalIdBlob = blobs.Get("invoices-by-iid");
+        var invoicesByInternalId = tables.MergeSorting((InvoiceDeJour x) => x.InternalId,
+            loggingName: "invoices by InternalId (original)");
 
+        var invoicesByInternalIdBlob = blobs.Get("invoices-by-iid");
         await invoicesByInternalIdBlob.Download(invoicesByInternalId.Stream);
     
         var invoicesByIidUpdated = await invoicesByInternalId.FullJoin(inputInvoicesByInternalId)
             .Select(x => x.Right ?? x.Left!)
-            .SortInto(tables, (InvoiceDeJour x) => x.InternalId);
+            .SortInto(tables, (InvoiceDeJour x) => x.InternalId,
+                loggingName: "invoices by InternalId (updated)");
 
         await invoicesByInternalIdBlob.Upload(invoicesByIidUpdated.Stream);
         return invoicesByIidUpdated;
@@ -241,11 +260,8 @@ public class Processing(IProcessingBlobs blobs, ITableSource tables) : IProcessi
         GetInvoiceIdsByBucketKeyHash(ISortedTable<InvoiceDeJour, int> invoicesByInternalId)
     {
         // Only reading the columns we need for bucket
-        var invoicesByInternalIdForBucketing = new MergeSortingParquet<BucketValues, int>(
-            invoicesByInternalId.Stream, 
-            x => x.InternalId
-        );
-
+        var invoicesByInternalIdForBucketing = invoicesByInternalId.Cast<BucketValues>(b => b.InternalId);
+        
         return await invoicesByInternalIdForBucketing
             .SelectMany(invoice => _buckets.Select((bucket, bucketId) => new BucketKeyHash
             {
@@ -253,7 +269,8 @@ public class Processing(IProcessingBlobs blobs, ITableSource tables) : IProcessi
                 KeyHash = GetSimpleStringHash(bucket(invoice)), 
                 InvoiceInternalId = invoice.InternalId,
             }).ToAsyncEnumerable())
-            .SortInto(tables, (BucketKeyHash x) => (x.BucketId, x.KeyHash), 1_000_000);
+            .SortInto(tables, (BucketKeyHash x) => (x.BucketId, x.KeyHash), 1_000_000,
+                loggingName: "InternalId by bucket Id/KeyHash");
     }
 
     public Task<ITempSortedTable<PotentialBucket, int>> GetPotentialBuckets(
@@ -268,7 +285,8 @@ public class Processing(IProcessingBlobs blobs, ITableSource tables) : IProcessi
                 InvoiceInternalId = x.InvoiceInternalId 
             })
             .SortInto(tables,
-                (PotentialBucket x) => x.InvoiceInternalId, 1_000_000);
+                (PotentialBucket x) => x.InvoiceInternalId, 1_000_000,
+                loggingName: "Potential buckets");
     
 
     public Task<ITempSortedTable<BucketKey, (byte BucketId, string BucketKey)>> GetInvoicesByBucketKey(
@@ -279,9 +297,10 @@ public class Processing(IProcessingBlobs blobs, ITableSource tables) : IProcessi
             { 
                 BucketId = item.Right.BucketId, 
                 Key = _buckets[item.Right.BucketId](item.Left), 
-                InvoiceIndex = item.Right.InvoiceInternalId,
+                InvoiceInternalId = item.Right.InvoiceInternalId,
             })
-            .SortInto(tables, (BucketKey x) => (x.BucketId, x.Key));
+            .SortInto(tables, (BucketKey x) => (x.BucketId, x.Key),
+                loggingName: "InternalId by bucket Id/Key");
 
     private static IEnumerable<Pair> GeneratePairs(IReadOnlyList<BucketKey> group)
     {        
@@ -292,7 +311,7 @@ public class Processing(IProcessingBlobs blobs, ITableSource tables) : IProcessi
         {
             for (var y = x + 1; y < group.Count; y++)
             {
-                var (FirstId, SecondId) = (group[x].InvoiceIndex, group[y].InvoiceIndex);
+                var (FirstId, SecondId) = (group[x].InvoiceInternalId, group[y].InvoiceInternalId);
                 if (FirstId > SecondId)
                 {
                     (FirstId, SecondId) = (SecondId, FirstId);
@@ -318,7 +337,8 @@ public class Processing(IProcessingBlobs blobs, ITableSource tables) : IProcessi
             })
             .Where(g => g.Count >= 2 && g.Count <= 5)
             .SelectMany(g => GeneratePairs(g).ToAsyncEnumerable())
-            .SortInto(tables, (Pair x) => (x.FirstId, x.SecondId));
+            .SortInto(tables, (Pair x) => (x.FirstId, x.SecondId),
+                loggingName: "Pair by invoice InternalId (first, second)");
 
     public Task<ITempSortedTable<Pair, int>> GetBestPairsByFirstId(
         ISortedTable<Pair, (int FirstId, int SecondId)> allPairsByFirstAndSecondId)    
@@ -343,7 +363,8 @@ public class Processing(IProcessingBlobs blobs, ITableSource tables) : IProcessi
                 SecondId = x.Right.SecondId,
                 MinBucketId = x.Right.BucketId,
             })
-            .SortInto(tables, (PairWithFirstInvoice x) => x.SecondId);
+            .SortInto(tables, (PairWithFirstInvoice x) => x.SecondId,
+                loggingName: "pairs with first invoice data, by second InternalId");
 
     private static PairWithScore ScorePair(InvoiceDeJour first, InvoiceDeJour second, byte minBucketId)
     {
@@ -368,7 +389,8 @@ public class Processing(IProcessingBlobs blobs, ITableSource tables) : IProcessi
     {
         var scoredPairs = await invoicesByInternalId.InnerJoin(pairsBySecondId)
             .Select(x => ScorePair(x.Right.First, x.Left, x.Right.MinBucketId))
-            .SortInto(tables, (PairWithScore x) => x.LeaderId);
+            .SortInto(tables, (PairWithScore x) => x.LeaderId,
+                loggingName: "Pair scores by leader InternalId");
 
         await blobs.Get("scored-pairs-by-leader").Upload(scoredPairs.Stream);
     }
