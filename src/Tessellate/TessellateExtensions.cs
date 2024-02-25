@@ -34,7 +34,7 @@ public static class TessellateExtensions
         Func<T, K> selectKey,
         int recordsPerBatch = 100_000) where T : notnull, new()
     {
-        var table = tables.PerSorted(selectKey, recordsPerBatch);
+        var table = tables.PreSorted(selectKey, recordsPerBatch);
         await source.ToTable(table);
         return table;
     }

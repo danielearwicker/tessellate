@@ -27,9 +27,10 @@ public interface ITableSource
     /// <param name="selectKey">Function that selects the sort key from a record</param>
     /// <param name="rowsPerGroup">Number of records per Parquet row group</param>
     /// <returns></returns>
-    ITempSortedTable<T, K> PerSorted<T, K>(
+    ITempSortedTable<T, K> PreSorted<T, K>(
         Func<T, K> selectKey,
-        int rowsPerGroup = 100_000) where T : notnull, new();
+        int rowsPerGroup = 100_000,
+        string? loggingName = null) where T : notnull, new();
 }
 
 public class TableSource(IFileSource files, ILogger<TableSource> logger) : ITableSource
@@ -40,16 +41,17 @@ public class TableSource(IFileSource files, ILogger<TableSource> logger) : ITabl
         int rowGroupsPerPartition = 100,
         string? loggingName = null) where T : notnull, new()
     {
-        var file = files.Create();
+        var file = files.Create((loggingName ?? "unknown") + ".parquet");
         var table = new MergeSortingParquet<T, K>(file.Content, selectKey, rowsPerGroup, rowGroupsPerPartition, logger, loggingName);
         return new TempSortedTable<T, K>(file, table);
     }
 
-    public ITempSortedTable<T, K> PerSorted<T, K>(
+    public ITempSortedTable<T, K> PreSorted<T, K>(
         Func<T, K> selectKey,
-        int rowsPerGroup = 100_000) where T : notnull, new()
+        int rowsPerGroup = 100_000,
+        string? loggingName = null) where T : notnull, new()
     {
-        var file = files.Create();
+        var file = files.Create((loggingName ?? "unknown") + ".parquet");
         var table = new PreSortedParquet<T, K>(file.Content, selectKey, rowsPerGroup);
         return new TempSortedTable<T, K>(file, table);
     }

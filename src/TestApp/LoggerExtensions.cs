@@ -14,7 +14,7 @@ public static class LoggerExtensions
 
         timer.Stop();
 
-        logger.LogInformation("{label}: {elapsed}s", label, timer.Elapsed.TotalSeconds);
+        logger.LogInformation("--- Timing [{label}]: {elapsed}s ---", label, timer.Elapsed.TotalSeconds);
         return result;
     }
 

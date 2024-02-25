@@ -16,13 +16,15 @@ public interface IFile : IDisposable
 /// </summary>
 public interface IFileSource : IDisposable
 {
-    IFile Create();
+    IFile Create(string name);
+
+    public (int Files, long Bytes) GetStats();
 }
 
 /// <summary>
 /// Implementation of <see cref="IFileSource"/>.
 /// </summary>
-public sealed class FileSource : IFileSource
+public sealed class FileSource(string dirPath) : IFileSource
 {
     private sealed class TempFile : IFile
     {
@@ -31,12 +33,12 @@ public sealed class FileSource : IFileSource
 
         public Stream Content { get; private set; }
 
-        public TempFile(FileSource source)
+        public TempFile(FileSource source, string path)
         {
             _source = source;
+            _path = path;
 
-            Content = new FileStream(_path = Path.GetTempFileName(),
-                            FileMode.OpenOrCreate, FileAccess.ReadWrite);            
+            Content = new FileStream(_path, FileMode.OpenOrCreate, FileAccess.ReadWrite);            
         }
 
         public void Dispose()
@@ -49,11 +51,17 @@ public sealed class FileSource : IFileSource
 
     private readonly HashSet<TempFile> _files = [];
 
-    public IFile Create()
-    {
-        var file = new TempFile(this);
+    public IFile Create(string name)
+    {        
+        var file = new TempFile(this, Path.Combine(dirPath, $"{DateTime.UtcNow.Ticks}_{name}"));
         _files.Add(file);
         return file;
+    }
+
+    public (int Files, long Bytes) GetStats()
+    {
+        var files = new DirectoryInfo(dirPath).GetFiles();
+        return (files.Length, files.Sum(x => x.Length));
     }
 
     public void Dispose()

@@ -48,6 +48,7 @@ public class ProcessingBlobs : IProcessingBlobs
         public async Task Upload(Stream source) 
         {
             await ensureContainerExists;
+            source.Position = 0;
             await logger.Measure($"Uploading {client.Name}", () => client.UploadAsync(source, true));
         }
     }

@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+﻿using System.ComponentModel.DataAnnotations;
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Tessellate;
 using TestApp;
@@ -8,7 +9,7 @@ var logged = DateTime.UtcNow;
 var loggers = LoggerFactory.Create(builder => builder.AddConsole());
 
 // When this is disposed, all temporary files created from it are deleted
-using var files = new FileSource();
+using var files = new FileSource("/mnt/temp");
 
 var blobs = new ProcessingBlobs(
     "https://blipvart.blob.core.windows.net", 
@@ -93,24 +94,33 @@ async Task LogMemory(ILogger logger, CancellationToken cancellation)
 {    
     try
     {
+        var timerAll = new Stopwatch();
+        timerAll.Start();
         while (!cancellation.IsCancellationRequested)
         {
-            await Task.Delay(TimeSpan.FromSeconds(1), cancellation);
+            await Task.Delay(TimeSpan.FromSeconds(2), cancellation);
 
-            var unit = 0;
-            double value = Process.GetCurrentProcess().PrivateMemorySize64;
-            while (value > 900)
-            {
-                unit++;
-                value /= 1000;
-            }
+            var (fileCount, fileBytes) = files.GetStats();
 
-            var unitName = new[] { "B", "KB", "MB", "GB", "TB", "PB" }[unit];
+            var pq = 100 * Timers.PriorityQueue.Elapsed.TotalSeconds / timerAll.Elapsed.TotalSeconds;
 
-            value = Math.Round(value * 100) / 100;
-
-            logger.LogInformation("Private bytes: {value} {unit}", value, unitName);
+            logger.LogInformation("Memory {memory} - {files} files totalling {saved}, {pq}%",
+                FormatSize(Process.GetCurrentProcess().PrivateMemorySize64), fileCount, FormatSize(fileBytes), pq);
         }
     }
     catch (TaskCanceledException) {}
+}
+
+string FormatSize(double value)
+{
+    var unit = 0;
+    while (value > 900)
+    {
+        unit++;
+        value /= 1000;
+    }
+
+    var unitName = new[] { "B", "KB", "MB", "GB", "TB", "PB" }[unit];
+
+    return $"{Math.Round(value * 100) / 100} {unitName}";
 }

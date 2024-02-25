@@ -5,6 +5,11 @@ using Microsoft.Extensions.Logging;
 using Parquet;
 using Parquet.Serialization;
 
+public static class Timers
+{
+    public static readonly Stopwatch PriorityQueue = new();
+}
+
 /// <summary>
 /// A Parquet file to which records can be written in any order, and when
 /// later read the records will be ordered by the provided key. 
@@ -72,13 +77,17 @@ public record MergeSortingParquet<T, K>(
 
         while (queue.Count != 0)
         {
+            Timers.PriorityQueue.Start();
             var next = queue.Dequeue();
+            Timers.PriorityQueue.Stop();
 
             yield return next.Current;
 
             if (await next.MoveNextAsync())
             {
+                Timers.PriorityQueue.Start();
                 queue.Enqueue(next, SelectKey(next.Current));
+                Timers.PriorityQueue.Stop();
             }            
         }
     }
